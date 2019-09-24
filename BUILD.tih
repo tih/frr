@@ -10,7 +10,7 @@ if [ ! -f libtool ]; then
 fi
 
 export MAKE=gmake
-export LDFLAGS="-L${LOCAL}/lib -R${LOCAL}/lib -L${PKG}/lib -R${PKG}/lib""
+export LDFLAGS="-L${LOCAL}/lib -R${LOCAL}/lib -L${PKG}/lib -R${PKG}/lib"
 export CPPFLAGS="-I${LOCAL}/include -I${PKG}/include"
 
 ./configure --prefix=${PREFIX} \
