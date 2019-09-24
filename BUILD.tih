@@ -1,0 +1,31 @@
+#!/bin/sh
+
+LOCAL=/usr/local
+PREFIX=/usr/local
+
+if [ ! -f libtool ]; then
+    ./bootstrap.sh
+    ln -s /usr/pkg/bin/libtool .
+fi
+
+export MAKE=gmake
+export LDFLAGS="-L${LOCAL}/lib -R${LOCAL}/lib"
+export CPPFLAGS="-I${LOCAL}/include"
+
+./configure --prefix=${PREFIX} \
+  --sysconfdir=${PREFIX}/etc/frr \
+  --localstatedir=/var/run/frr \
+  --enable-exampledir=${PREFIX}/share/examples/frr \
+  --enable-pkgsrcrcdir=${PREFIX}/etc/rc.d \
+  --enable-user=frr \
+  --enable-group=frr \
+  --enable-vtysh \
+  --enable-vty-group=frrvty \
+  --enable-configfile-mask=0640 \
+  --enable-logfile-mask=0640 \
+  --enable-fpm \
+  --disable-vrrpd \
+  --with-pkg-git-version \
+  --with-pkg-extra-version=-tih
+
+${MAKE}
