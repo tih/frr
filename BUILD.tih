@@ -2,21 +2,22 @@
 
 LOCAL=/usr/local
 PREFIX=/usr/local
+PKG=/usr/pkg
 
 if [ ! -f libtool ]; then
     ./bootstrap.sh
-    ln -s /usr/pkg/bin/libtool .
+    cp /usr/pkg/bin/libtool .
 fi
 
 export MAKE=gmake
-export LDFLAGS="-L${LOCAL}/lib -R${LOCAL}/lib"
-export CPPFLAGS="-I${LOCAL}/include"
+export LDFLAGS="-L${LOCAL}/lib -R${LOCAL}/lib -L${PKG}/lib -R${PKG}/lib""
+export CPPFLAGS="-I${LOCAL}/include -I${PKG}/include"
 
 ./configure --prefix=${PREFIX} \
   --sysconfdir=${PREFIX}/etc/frr \
   --localstatedir=/var/run/frr \
   --enable-exampledir=${PREFIX}/share/examples/frr \
-  --enable-pkgsrcrcdir=${PREFIX}/etc/rc.d \
+  --enable-pkgsrcrcdir=${PREFIX}/share/examples/rc.d \
   --enable-user=frr \
   --enable-group=frr \
   --enable-vtysh \
