@@ -12,6 +12,7 @@ fi
 export MAKE=gmake
 export LDFLAGS="-L${LOCAL}/lib -R${LOCAL}/lib -L${PKG}/lib -R${PKG}/lib"
 export CPPFLAGS="-I${LOCAL}/include -I${PKG}/include"
+export PKG_CONFIG_PATH="${LOCAL}/lib/pkgconfig:${PKG}/lib/pkgconfig"
 
 ./configure --prefix=${PREFIX} \
   --sysconfdir=${PREFIX}/etc/frr \
