@@ -62,6 +62,8 @@
 #define BGP_PREFIX_SID_LABEL_INDEX     1
 #define BGP_PREFIX_SID_IPV6            2
 #define BGP_PREFIX_SID_ORIGINATOR_SRGB 3
+#define BGP_PREFIX_SID_SRV6_L3_SERVICE 5
+#define BGP_PREFIX_SID_SRV6_L2_SERVICE 6
 
 #define BGP_PREFIX_SID_LABEL_INDEX_LENGTH      7
 #define BGP_PREFIX_SID_IPV6_LENGTH            19
@@ -209,6 +211,9 @@ struct attr {
 
 	/* Distance as applied by Route map */
 	uint8_t distance;
+
+	/* rmap set table */
+	uint32_t rmap_table_id;
 };
 
 /* rmap_change_flags definition */

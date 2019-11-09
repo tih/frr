@@ -18,6 +18,8 @@
 //
 
 #include <zebra.h>
+#include <grpcpp/grpcpp.h>
+#include "grpc/frr-northbound.grpc.pb.h"
 
 #include "log.h"
 #include "libfrr.h"
@@ -31,9 +33,6 @@
 #include <sstream>
 #include <memory>
 #include <string>
-
-#include <grpcpp/grpcpp.h>
-#include "grpc/frr-northbound.grpc.pb.h"
 
 #define GRPC_DEFAULT_PORT 50051
 
@@ -617,6 +616,11 @@ class NorthboundImpl final : public frr::Northbound::Service
 			return LYD_JSON;
 		case frr::XML:
 			return LYD_XML;
+		default:
+			flog_err(EC_LIB_DEVELOPMENT,
+				 "%s: unknown data encoding format (%u)",
+				 __func__, encoding);
+			exit(1);
 		}
 	}
 

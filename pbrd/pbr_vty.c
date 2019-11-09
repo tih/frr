@@ -133,10 +133,8 @@ DEFPY(pbr_map_match_src, pbr_map_match_src_cmd,
 		if (!pbrms->src)
 			pbrms->src = prefix_new();
 		prefix_copy(pbrms->src, prefix);
-	} else {
-		prefix_free(pbrms->src);
-		pbrms->src = 0;
-	}
+	} else
+		prefix_free(&pbrms->src);
 
 	pbr_map_check(pbrms);
 
@@ -162,10 +160,8 @@ DEFPY(pbr_map_match_dst, pbr_map_match_dst_cmd,
 		if (!pbrms->dst)
 			pbrms->dst = prefix_new();
 		prefix_copy(pbrms->dst, prefix);
-	} else {
-		prefix_free(pbrms->dst);
-		pbrms->dst = NULL;
-	}
+	} else
+		prefix_free(&pbrms->dst);
 
 	pbr_map_check(pbrms);
 
@@ -254,7 +250,7 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 	  <A.B.C.D|X:X::X:X>$addr [INTERFACE$intf]\
 	  |INTERFACE$intf\
 	>\
-        [nexthop-vrf NAME$name]",
+        [nexthop-vrf NAME$vrf_name]",
       NO_STR
       "Set for the PBR-MAP\n"
       "Specify one of the nexthops in this map\n"
@@ -276,13 +272,13 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	if (name)
-		vrf = vrf_lookup_by_name(name);
+	if (vrf_name)
+		vrf = vrf_lookup_by_name(vrf_name);
 	else
 		vrf = vrf_lookup_by_id(VRF_DEFAULT);
 
 	if (!vrf) {
-		vty_out(vty, "Specified: %s is non-existent\n", name);
+		vty_out(vty, "Specified: %s is non-existent\n", vrf_name);
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
@@ -363,7 +359,9 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 		pbr_map_check(pbrms);
 	}
 
-	if (nhop.type == NEXTHOP_TYPE_IFINDEX) {
+	if (nhop.type == NEXTHOP_TYPE_IFINDEX
+	    || (nhop.type == NEXTHOP_TYPE_IPV6_IFINDEX
+		&& IN6_IS_ADDR_LINKLOCAL(&nhop.gate.ipv6))) {
 		struct interface *ifp;
 
 		ifp = if_lookup_by_index(nhop.ifindex, nhop.vrf_id);

@@ -406,7 +406,7 @@ static int bgpd_sync_callback(struct thread *thread)
 		}
 	}
 
-	prefix_free(prefix);
+	prefix_free(&prefix);
 	return 0;
 }
 
@@ -1234,7 +1234,8 @@ DEFPY (show_rpki_prefix,
 		const struct pfx_record *record = &matches[i];
 
 		if (record->max_len >= prefix->prefixlen
-		    && ((asn != 0 && asn == record->asn) || asn == 0)) {
+		    && ((asn != 0 && (uint32_t)asn == record->asn)
+			|| asn == 0)) {
 			print_record(&matches[i], vty);
 		}
 	}

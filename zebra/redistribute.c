@@ -263,8 +263,11 @@ void redistribute_delete(const struct prefix *p, const struct prefix *src_p,
 	}
 
 	/* Add DISTANCE_INFINITY check. */
-	if (old_re && (old_re->distance == DISTANCE_INFINITY))
+	if (old_re && (old_re->distance == DISTANCE_INFINITY)) {
+		if (IS_ZEBRA_DEBUG_RIB)
+			zlog_debug("\tSkipping due to Infinite Distance");
 		return;
+	}
 
 	afi = family2afi(p->family);
 	if (!afi) {
@@ -310,14 +313,14 @@ void redistribute_delete(const struct prefix *p, const struct prefix *src_p,
 
 		/* Send a delete for the 'old' re to any subscribed client. */
 		if (old_re
-		    && ((old_re->instance
-			 && redist_check_instance(
-				 &client->mi_redist[afi]
-				 [old_re->type],
-				 old_re->instance))
-			|| vrf_bitmap_check(
-				client->redist[afi][old_re->type],
-				old_re->vrf_id))) {
+		    && (vrf_bitmap_check(client->redist[afi][ZEBRA_ROUTE_ALL],
+					 old_re->vrf_id)
+			|| (old_re->instance
+			    && redist_check_instance(
+				       &client->mi_redist[afi][old_re->type],
+				       old_re->instance))
+			|| vrf_bitmap_check(client->redist[afi][old_re->type],
+					    old_re->vrf_id))) {
 			zsend_redistribute_route(ZEBRA_REDISTRIBUTE_ROUTE_DEL,
 						 client, p, src_p, old_re);
 		}
@@ -640,7 +643,7 @@ int zebra_add_import_table_entry(struct zebra_vrf *zvrf, struct route_node *rn,
 	afi = family2afi(rn->p.family);
 	if (rmap_name)
 		ret = zebra_import_table_route_map_check(
-			afi, re->type, re->instance, &rn->p, re->ng.nexthop,
+			afi, re->type, re->instance, &rn->p, re->ng->nexthop,
 			zvrf->vrf->vrf_id, re->tag, rmap_name);
 
 	if (ret != RMAP_PERMITMATCH) {
@@ -673,10 +676,10 @@ int zebra_add_import_table_entry(struct zebra_vrf *zvrf, struct route_node *rn,
 	newre->metric = re->metric;
 	newre->mtu = re->mtu;
 	newre->table = zvrf->table_id;
-	newre->nexthop_num = 0;
 	newre->uptime = monotime(NULL);
 	newre->instance = re->table;
-	route_entry_copy_nexthops(newre, re->ng.nexthop);
+	newre->ng = nexthop_group_new();
+	route_entry_copy_nexthops(newre, re->ng->nexthop);
 
 	rib_add_multipath(afi, SAFI_UNICAST, &p, NULL, newre);
 
@@ -693,7 +696,7 @@ int zebra_del_import_table_entry(struct zebra_vrf *zvrf, struct route_node *rn,
 	prefix_copy(&p, &rn->p);
 
 	rib_delete(afi, SAFI_UNICAST, zvrf->vrf->vrf_id, ZEBRA_ROUTE_TABLE,
-		   re->table, re->flags, &p, NULL, re->ng.nexthop,
+		   re->table, re->flags, &p, NULL, re->ng->nexthop, re->nhe_id,
 		   zvrf->table_id, re->metric, re->distance, false);
 
 	return 0;
@@ -715,8 +718,8 @@ int zebra_import_table(afi_t afi, vrf_id_t vrf_id, uint32_t table_id,
 	if (afi >= AFI_MAX)
 		return (-1);
 
-	table = zebra_vrf_table_with_table_id(afi, SAFI_UNICAST, vrf_id,
-					      table_id);
+	table = zebra_vrf_get_table_with_table_id(afi, SAFI_UNICAST, vrf_id,
+						  table_id);
 	if (table == NULL) {
 		return 0;
 	} else if (IS_ZEBRA_DEBUG_RIB) {
@@ -827,8 +830,8 @@ static void zebra_import_table_rm_update_vrf_afi(struct zebra_vrf *zvrf,
 	if ((!rmap_name) || (strcmp(rmap_name, rmap) != 0))
 		return;
 
-	table = zebra_vrf_table_with_table_id(afi, SAFI_UNICAST,
-					      zvrf->vrf->vrf_id, table_id);
+	table = zebra_vrf_get_table_with_table_id(afi, SAFI_UNICAST,
+						  zvrf->vrf->vrf_id, table_id);
 	if (!table) {
 		if (IS_ZEBRA_DEBUG_RIB_DETAILED)
 			zlog_debug("%s: Table id=%d not found", __func__,
