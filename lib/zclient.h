@@ -178,6 +178,11 @@ typedef enum {
 	ZEBRA_VXLAN_SG_ADD,
 	ZEBRA_VXLAN_SG_DEL,
 	ZEBRA_VXLAN_SG_REPLAY,
+	ZEBRA_MLAG_PROCESS_UP,
+	ZEBRA_MLAG_PROCESS_DOWN,
+	ZEBRA_MLAG_CLIENT_REGISTER,
+	ZEBRA_MLAG_CLIENT_UNREGISTER,
+	ZEBRA_MLAG_FORWARD_MSG,
 } zebra_message_types_t;
 
 struct redist_proto {
@@ -272,6 +277,9 @@ struct zclient {
 	int (*iptable_notify_owner)(ZAPI_CALLBACK_ARGS);
 	int (*vxlan_sg_add)(ZAPI_CALLBACK_ARGS);
 	int (*vxlan_sg_del)(ZAPI_CALLBACK_ARGS);
+	int (*mlag_process_up)(void);
+	int (*mlag_process_down)(void);
+	int (*mlag_handle_msg)(struct stream *msg, int len);
 };
 
 /* Zebra API message flag. */
@@ -482,6 +490,7 @@ enum zapi_iptable_notify_owner {
 #define ZEBRA_MACIP_TYPE_GW                    0x02 /* gateway (SVI) mac*/
 #define ZEBRA_MACIP_TYPE_ROUTER_FLAG           0x04 /* Router Flag - proxy NA */
 #define ZEBRA_MACIP_TYPE_OVERRIDE_FLAG         0x08 /* Override Flag */
+#define ZEBRA_MACIP_TYPE_SVI_IP                0x10 /* SVI MAC-IP */
 
 enum zebra_neigh_state { ZEBRA_NEIGH_INACTIVE = 0, ZEBRA_NEIGH_ACTIVE = 1 };
 
@@ -694,5 +703,11 @@ static inline void zapi_route_set_blackhole(struct zapi_route *api,
 	SET_FLAG(api->message, ZAPI_MESSAGE_NEXTHOP);
 };
 
+extern void zclient_send_mlag_register(struct zclient *client,
+				       uint32_t bit_map);
+extern void zclient_send_mlag_deregister(struct zclient *client);
+
+extern void zclient_send_mlag_data(struct zclient *client,
+				   struct stream *client_s);
 
 #endif /* _ZEBRA_ZCLIENT_H */

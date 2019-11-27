@@ -426,15 +426,15 @@ static int static_route_leak(
 
 	/* Null0 static route.  */
 	if (ifname != NULL) {
-		if (strncasecmp(ifname, "Null0", strlen(ifname)) == 0
-		    || strncasecmp(ifname, "reject", strlen(ifname)) == 0
-		    || strncasecmp(ifname, "blackhole", strlen(ifname)) == 0) {
+		if (strcasecmp(ifname, "Null0") == 0
+		    || strcasecmp(ifname, "reject") == 0
+		    || strcasecmp(ifname, "blackhole") == 0) {
 			if (vty)
 				vty_out(vty,
-					"%% Nexthop interface cannot be Null0, reject or blackhole\n");
+					"%% Nexthop interface name can not be from reserved keywords (Null0, reject, blackhole)\n");
 			else
 				zlog_warn(
-					"%s: Nexthop interface cannot be Null0, reject or blackhole for %s",
+					"%s: %s: Nexthop interface name can not be from reserved keywords (Null0, reject, blackhole)",
 					__PRETTY_FUNCTION__, dest_str);
 			return CMD_WARNING_CONFIG_FAILED;
 		}

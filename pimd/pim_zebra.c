@@ -46,11 +46,12 @@
 #include "pim_nht.h"
 #include "pim_ssm.h"
 #include "pim_vxlan.h"
+#include "pim_mlag.h"
 
 #undef PIM_DEBUG_IFADDR_DUMP
 #define PIM_DEBUG_IFADDR_DUMP
 
-static struct zclient *zclient = NULL;
+struct zclient *zclient;
 
 
 /* Router-id update message from zebra. */
@@ -587,6 +588,9 @@ void pim_zebra_init(void)
 	zclient->nexthop_update = pim_parse_nexthop_update;
 	zclient->vxlan_sg_add = pim_zebra_vxlan_sg_proc;
 	zclient->vxlan_sg_del = pim_zebra_vxlan_sg_proc;
+	zclient->mlag_process_up = pim_zebra_mlag_process_up;
+	zclient->mlag_process_down = pim_zebra_mlag_process_down;
+	zclient->mlag_handle_msg = pim_zebra_mlag_handle_msg;
 
 	zclient_init(zclient, ZEBRA_ROUTE_PIM, 0, &pimd_privs);
 	if (PIM_DEBUG_PIM_TRACE) {
@@ -855,27 +859,24 @@ void igmp_source_forward_start(struct pim_instance *pim,
 		}
 	}
 
-	result = pim_channel_add_oif(source->source_channel_oil,
-				     group->group_igmp_sock->interface,
-				     PIM_OIF_FLAG_PROTO_IGMP);
-	if (result) {
-		if (PIM_DEBUG_MROUTE) {
-			zlog_warn("%s: add_oif() failed with return=%d",
-				  __func__, result);
+	if (PIM_I_am_DR(pim_oif)) {
+		result = pim_channel_add_oif(source->source_channel_oil,
+					     group->group_igmp_sock->interface,
+					     PIM_OIF_FLAG_PROTO_IGMP);
+		if (result) {
+			if (PIM_DEBUG_MROUTE) {
+				zlog_warn("%s: add_oif() failed with return=%d",
+					  __func__, result);
+			}
+			return;
 		}
-		return;
-	}
-
-	if (!(PIM_I_am_DR(pim_oif))) {
+	} else {
 		if (PIM_DEBUG_IGMP_TRACE)
 			zlog_debug("%s: %s was received on %s interface but we are not DR for that interface",
 				   __PRETTY_FUNCTION__,
 				   pim_str_sg_dump(&sg),
 				   group->group_igmp_sock->interface->name);
 
-		pim_channel_del_oif(source->source_channel_oil,
-				    group->group_igmp_sock->interface,
-				    PIM_OIF_FLAG_PROTO_IGMP);
 		return;
 	}
 	/*

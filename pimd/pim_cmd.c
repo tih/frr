@@ -61,6 +61,7 @@
 #include "pim_nht.h"
 #include "pim_bfd.h"
 #include "pim_vxlan.h"
+#include "pim_mlag.h"
 #include "bfd.h"
 #include "pim_bsm.h"
 
@@ -7381,12 +7382,14 @@ static int pim_cmd_interface_add(struct interface *ifp)
 	struct pim_interface *pim_ifp = ifp->info;
 
 	if (!pim_ifp)
-		(void)pim_if_new(ifp, false, true, false, false);
+		pim_ifp = pim_if_new(ifp, false, true, false, false);
 	else
 		PIM_IF_DO_PIM(pim_ifp->options);
 
 	pim_if_addr_add_all(ifp);
 	pim_if_membership_refresh(ifp);
+
+	pim_if_create_pimreg(pim_ifp->pim);
 	return 1;
 }
 
@@ -7458,9 +7461,9 @@ DEFPY_HIDDEN (interface_ip_pim_activeactive,
 
 	pim_ifp = ifp->info;
 	if (no)
-		pim_ifp->activeactive = false;
+		pim_if_unconfigure_mlag_dualactive(pim_ifp);
 	else
-		pim_ifp->activeactive = true;
+		pim_if_configure_mlag_dualactive(pim_ifp);
 
 	return CMD_SUCCESS;
 }
@@ -8375,6 +8378,20 @@ DEFUN (no_debug_pim_zebra,
        DEBUG_PIM_ZEBRA_STR)
 {
 	PIM_DONT_DEBUG_ZEBRA;
+	return CMD_SUCCESS;
+}
+
+DEFUN(debug_pim_mlag, debug_pim_mlag_cmd, "debug pim mlag",
+      DEBUG_STR DEBUG_PIM_STR DEBUG_PIM_MLAG_STR)
+{
+	PIM_DO_DEBUG_MLAG;
+	return CMD_SUCCESS;
+}
+
+DEFUN(no_debug_pim_mlag, no_debug_pim_mlag_cmd, "no debug pim mlag",
+      NO_STR DEBUG_STR DEBUG_PIM_STR DEBUG_PIM_MLAG_STR)
+{
+	PIM_DONT_DEBUG_MLAG;
 	return CMD_SUCCESS;
 }
 
@@ -10404,6 +10421,8 @@ void pim_cmd_init(void)
 	install_element(ENABLE_NODE, &no_debug_ssmpingd_cmd);
 	install_element(ENABLE_NODE, &debug_pim_zebra_cmd);
 	install_element(ENABLE_NODE, &no_debug_pim_zebra_cmd);
+	install_element(ENABLE_NODE, &debug_pim_mlag_cmd);
+	install_element(ENABLE_NODE, &no_debug_pim_mlag_cmd);
 	install_element(ENABLE_NODE, &debug_pim_vxlan_cmd);
 	install_element(ENABLE_NODE, &no_debug_pim_vxlan_cmd);
 	install_element(ENABLE_NODE, &debug_msdp_cmd);

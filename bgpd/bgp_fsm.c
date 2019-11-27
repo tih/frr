@@ -101,7 +101,7 @@ static int bgp_peer_reg_with_nht(struct peer *peer)
 {
 	int connected = 0;
 
-	if (peer->sort == BGP_PEER_EBGP && peer->ttl == 1
+	if (peer->sort == BGP_PEER_EBGP && peer->ttl == BGP_DEFAULT_TTL
 	    && !CHECK_FLAG(peer->flags, PEER_FLAG_DISABLE_CONNECTED_CHECK)
 	    && !bgp_flag_check(peer->bgp, BGP_FLAG_DISABLE_NH_CONNECTED_CHK))
 		connected = 1;
@@ -1359,8 +1359,9 @@ static int bgp_connect_success(struct peer *peer)
 		flog_err_sys(EC_LIB_SOCKET,
 			     "%s: bgp_getsockname(): failed for peer %s, fd %d",
 			     __FUNCTION__, peer->host, peer->fd);
-		bgp_notify_send(peer, BGP_NOTIFY_FSM_ERR,
-				0); /* internal error */
+		bgp_notify_send(
+			peer, BGP_NOTIFY_FSM_ERR,
+			BGP_NOTIFY_SUBCODE_UNSPECIFIC); /* internal error */
 		bgp_writes_on(peer);
 		return -1;
 	}

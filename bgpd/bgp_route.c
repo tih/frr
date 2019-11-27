@@ -196,7 +196,8 @@ void bgp_path_info_extra_free(struct bgp_path_info_extra **extra)
 
 	e = *extra;
 	if (e->damp_info)
-		bgp_damp_info_free(e->damp_info, 0);
+		bgp_damp_info_free(e->damp_info, 0, e->damp_info->afi,
+				   e->damp_info->safi);
 
 	e->damp_info = NULL;
 	if (e->parent) {
@@ -1243,7 +1244,7 @@ static int bgp_cluster_filter(struct peer *peer, struct attr *attr)
 static int bgp_input_modifier(struct peer *peer, struct prefix *p,
 			      struct attr *attr, afi_t afi, safi_t safi,
 			      const char *rmap_name, mpls_label_t *label,
-			      uint32_t num_labels)
+			      uint32_t num_labels, struct bgp_node *rn)
 {
 	struct bgp_filter *filter;
 	struct bgp_path_info rmap_path = { 0 };
@@ -1278,6 +1279,8 @@ static int bgp_input_modifier(struct peer *peer, struct prefix *p,
 		rmap_path.peer = peer;
 		rmap_path.attr = attr;
 		rmap_path.extra = &extra;
+		rmap_path.net = rn;
+
 		extra.num_labels = num_labels;
 		if (label && num_labels && num_labels <= BGP_MAX_LABELS)
 			memcpy(extra.label, label,
@@ -1794,6 +1797,7 @@ int subgroup_announce_check(struct bgp_node *rn, struct bgp_path_info *pi,
 		memset(&rmap_path, 0, sizeof(struct bgp_path_info));
 		rmap_path.peer = peer;
 		rmap_path.attr = attr;
+		rmap_path.net = rn;
 
 		if (pi->extra) {
 			memcpy(&dummy_rmap_path_extra, pi->extra,
@@ -2966,7 +2970,8 @@ static bool overlay_index_equal(afi_t afi, struct bgp_path_info *path,
 
 /* Check if received nexthop is valid or not. */
 static int bgp_update_martian_nexthop(struct bgp *bgp, afi_t afi, safi_t safi,
-				      struct attr *attr)
+				uint8_t type, uint8_t stype,
+				struct attr *attr, struct bgp_node *rn)
 {
 	int ret = 0;
 
@@ -2979,7 +2984,8 @@ static int bgp_update_martian_nexthop(struct bgp *bgp, afi_t afi, safi_t safi,
 	if (attr->flag & ATTR_FLAG_BIT(BGP_ATTR_NEXT_HOP)) {
 		if (attr->nexthop.s_addr == 0
 		    || IPV4_CLASS_DE(ntohl(attr->nexthop.s_addr))
-		    || bgp_nexthop_self(bgp, attr->nexthop))
+		    || bgp_nexthop_self(bgp, afi, type, stype,
+			attr, rn))
 			return 1;
 	}
 
@@ -2995,8 +3001,8 @@ static int bgp_update_martian_nexthop(struct bgp *bgp, afi_t afi, safi_t safi,
 			ret = (attr->mp_nexthop_global_in.s_addr == 0
 			       || IPV4_CLASS_DE(ntohl(
 					  attr->mp_nexthop_global_in.s_addr))
-			       || bgp_nexthop_self(bgp,
-						   attr->mp_nexthop_global_in));
+			       || bgp_nexthop_self(bgp, afi, type, stype,
+						   attr, rn));
 			break;
 
 		case BGP_ATTR_NHLEN_IPV6_GLOBAL:
@@ -3005,7 +3011,9 @@ static int bgp_update_martian_nexthop(struct bgp *bgp, afi_t afi, safi_t safi,
 			ret = (IN6_IS_ADDR_UNSPECIFIED(&attr->mp_nexthop_global)
 			       || IN6_IS_ADDR_LOOPBACK(&attr->mp_nexthop_global)
 			       || IN6_IS_ADDR_MULTICAST(
-					  &attr->mp_nexthop_global));
+					  &attr->mp_nexthop_global)
+			       || bgp_nexthop_self(bgp, afi, type, stype,
+						   attr, rn));
 			break;
 
 		default:
@@ -3037,6 +3045,10 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 	int connected = 0;
 	int do_loop_check = 1;
 	int has_valid_label = 0;
+	afi_t nh_afi;
+	uint8_t pi_type = 0;
+	uint8_t pi_sub_type = 0;
+
 #if ENABLE_BGP_VNC
 	int vnc_implicit_withdraw = 0;
 #endif
@@ -3152,7 +3164,7 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 	 * intern
 	 * the attr (which takes over the memory references) */
 	if (bgp_input_modifier(peer, p, &new_attr, afi, safi, NULL,
-		label, num_labels) == RMAP_DENY) {
+		label, num_labels, rn) == RMAP_DENY) {
 		peer->stat_pfx_filter++;
 		reason = "route-map;";
 		bgp_attr_flush(&new_attr);
@@ -3182,9 +3194,15 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 		}
 	}
 
+	if (pi) {
+		pi_type = pi->type;
+		pi_sub_type = pi->sub_type;
+	}
+
 	/* next hop check.  */
 	if (!CHECK_FLAG(peer->flags, PEER_FLAG_IS_RFAPI_HD)
-	    && bgp_update_martian_nexthop(bgp, afi, safi, &new_attr)) {
+		&& bgp_update_martian_nexthop(bgp, afi, safi, pi_type,
+		pi_sub_type, &new_attr, rn)) {
 		peer->stat_pfx_nh_invalid++;
 		reason = "martian or self next-hop;";
 		bgp_attr_flush(&new_attr);
@@ -3432,9 +3450,12 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 
 		/* Nexthop reachability check - for unicast and
 		 * labeled-unicast.. */
-		if ((afi == AFI_IP || afi == AFI_IP6)
-		    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST)) {
-			if (peer->sort == BGP_PEER_EBGP && peer->ttl == 1
+		if (((afi == AFI_IP || afi == AFI_IP6)
+		    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST))
+		    || (safi == SAFI_EVPN &&
+			bgp_evpn_is_prefix_nht_supported(p))) {
+			if (safi != SAFI_EVPN && peer->sort == BGP_PEER_EBGP
+			    && peer->ttl == BGP_DEFAULT_TTL
 			    && !CHECK_FLAG(peer->flags,
 					   PEER_FLAG_DISABLE_CONNECTED_CHECK)
 			    && !bgp_flag_check(
@@ -3448,8 +3469,10 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 			if (pi->extra && pi->extra->bgp_orig)
 				bgp_nexthop = pi->extra->bgp_orig;
 
-			if (bgp_find_or_add_nexthop(bgp, bgp_nexthop, afi, pi,
-						    NULL, connected)
+			nh_afi = BGP_ATTR_NH_AFI(afi, pi->attr);
+
+			if (bgp_find_or_add_nexthop(bgp, bgp_nexthop, nh_afi,
+						    pi, NULL, connected)
 			    || CHECK_FLAG(peer->flags, PEER_FLAG_IS_RFAPI_HD))
 				bgp_path_info_set_flag(rn, pi, BGP_PATH_VALID);
 			else {
@@ -3497,7 +3520,8 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 		 * updating
 		 * the attributes for the route in the VNI(s).
 		 */
-		if (safi == SAFI_EVPN && !same_attr)
+		if (safi == SAFI_EVPN && !same_attr &&
+		    CHECK_FLAG(pi->flags, BGP_PATH_VALID))
 			bgp_evpn_import_route(bgp, afi, safi, p, pi);
 
 		/* Process change. */
@@ -3570,9 +3594,11 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 				     evpn == NULL ? NULL : &evpn->gw_ip);
 	}
 	/* Nexthop reachability check. */
-	if ((afi == AFI_IP || afi == AFI_IP6)
-	    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST)) {
-		if (peer->sort == BGP_PEER_EBGP && peer->ttl == 1
+	if (((afi == AFI_IP || afi == AFI_IP6)
+	    && (safi == SAFI_UNICAST || safi == SAFI_LABELED_UNICAST))
+	    || (safi == SAFI_EVPN && bgp_evpn_is_prefix_nht_supported(p))) {
+		if (safi != SAFI_EVPN && peer->sort == BGP_PEER_EBGP
+		    && peer->ttl == BGP_DEFAULT_TTL
 		    && !CHECK_FLAG(peer->flags,
 				   PEER_FLAG_DISABLE_CONNECTED_CHECK)
 		    && !bgp_flag_check(bgp, BGP_FLAG_DISABLE_NH_CONNECTED_CHK))
@@ -3580,7 +3606,10 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 		else
 			connected = 0;
 
-		if (bgp_find_or_add_nexthop(bgp, bgp, afi, new, NULL, connected)
+		nh_afi = BGP_ATTR_NH_AFI(afi, new->attr);
+
+		if (bgp_find_or_add_nexthop(bgp, bgp, nh_afi, new, NULL,
+					    connected)
 		    || CHECK_FLAG(peer->flags, PEER_FLAG_IS_RFAPI_HD))
 			bgp_path_info_set_flag(rn, new, BGP_PATH_VALID);
 		else {
@@ -3631,7 +3660,7 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 		return -1;
 
 	/* If this is an EVPN route, process for import. */
-	if (safi == SAFI_EVPN)
+	if (safi == SAFI_EVPN && CHECK_FLAG(new->flags, BGP_PATH_VALID))
 		bgp_evpn_import_route(bgp, afi, safi, p, new);
 
 	hook_call(bgp_process, bgp, afi, safi, rn, peer, false);
@@ -4454,7 +4483,7 @@ int bgp_nlri_parse_ip(struct peer *peer, struct attr *attr,
 		if (addpath_encoded) {
 
 			/* When packet overflow occurs return immediately. */
-			if (pnt + BGP_ADDPATH_ID_LEN > lim)
+			if (pnt + BGP_ADDPATH_ID_LEN >= lim)
 				return BGP_NLRI_PARSE_ERROR_PACKET_OVERFLOW;
 
 			addpath_id = ntohl(*((uint32_t *)pnt));
@@ -7883,7 +7912,7 @@ void route_vty_out_overlay(struct vty *vty, struct prefix *p,
 
 /* dampening route */
 static void damp_route_vty_out(struct vty *vty, struct prefix *p,
-			       struct bgp_path_info *path, int display,
+			       struct bgp_path_info *path, int display, afi_t afi,
 			       safi_t safi, bool use_json, json_object *json)
 {
 	struct attr *attr;
@@ -7914,13 +7943,13 @@ static void damp_route_vty_out(struct vty *vty, struct prefix *p,
 	}
 
 	if (use_json)
-		bgp_damp_reuse_time_vty(vty, path, timebuf, BGP_UPTIME_LEN,
-					use_json, json);
+		bgp_damp_reuse_time_vty(vty, path, timebuf, BGP_UPTIME_LEN, afi,
+					safi, use_json, json);
 	else
 		vty_out(vty, "%s ",
 			bgp_damp_reuse_time_vty(vty, path, timebuf,
-						BGP_UPTIME_LEN, use_json,
-						json));
+						BGP_UPTIME_LEN, afi, safi,
+						use_json, json));
 
 	/* Print attribute */
 	attr = path->attr;
@@ -7947,7 +7976,7 @@ static void damp_route_vty_out(struct vty *vty, struct prefix *p,
 
 /* flap route */
 static void flap_route_vty_out(struct vty *vty, struct prefix *p,
-			       struct bgp_path_info *path, int display,
+			       struct bgp_path_info *path, int display, afi_t afi,
 			       safi_t safi, bool use_json, json_object *json)
 {
 	struct attr *attr;
@@ -8006,12 +8035,13 @@ static void flap_route_vty_out(struct vty *vty, struct prefix *p,
 	    && !CHECK_FLAG(path->flags, BGP_PATH_HISTORY)) {
 		if (use_json)
 			bgp_damp_reuse_time_vty(vty, path, timebuf,
-						BGP_UPTIME_LEN, use_json, json);
+						BGP_UPTIME_LEN, afi, safi,
+						use_json, json);
 		else
 			vty_out(vty, "%s ",
 				bgp_damp_reuse_time_vty(vty, path, timebuf,
-							BGP_UPTIME_LEN,
-							use_json, json));
+							BGP_UPTIME_LEN, afi,
+							safi, use_json, json));
 	} else {
 		if (!use_json)
 			vty_out(vty, "%*s ", 8, " ");
@@ -8879,7 +8909,7 @@ void route_vty_out_detail(struct vty *vty, struct bgp *bgp,
 	}
 
 	if (path->extra && path->extra->damp_info)
-		bgp_damp_info_vty(vty, path, json_path);
+		bgp_damp_info_vty(vty, path, afi, safi, json_path);
 
 	/* Remote Label */
 	if (path->extra && bgp_is_valid_label(&path->extra->label[0])
@@ -9292,11 +9322,11 @@ static int bgp_show_table(struct vty *vty, struct bgp *bgp, safi_t safi,
 			}
 			if (type == bgp_show_type_dampend_paths
 			    || type == bgp_show_type_damp_neighbor)
-				damp_route_vty_out(vty, &rn->p, pi, display,
+				damp_route_vty_out(vty, &rn->p, pi, display, AFI_IP,
 						   safi, use_json, json_paths);
 			else if (type == bgp_show_type_flap_statistics
 				 || type == bgp_show_type_flap_neighbor)
-				flap_route_vty_out(vty, &rn->p, pi, display,
+				flap_route_vty_out(vty, &rn->p, pi, display, AFI_IP,
 						   safi, use_json, json_paths);
 			else
 				route_vty_out(vty, &rn->p, pi, display, safi,
@@ -11109,7 +11139,7 @@ DEFUN (show_bgp_l2vpn_evpn_route_prefix,
 		argv_find(argv, argc, "X:X::X:X", &idx))
 		network = argv[idx]->arg;
 	else if (argv_find(argv, argc, "A.B.C.D/M", &idx) ||
-		argv_find(argv, argc, "A.B.C.D/M", &idx)) {
+		argv_find(argv, argc, "X:X::X:X/M", &idx)) {
 		network = argv[idx]->arg;
 		prefix_check = 1;
 	} else {
@@ -11297,7 +11327,8 @@ static void show_adj_route(struct vty *vty, struct peer *peer, afi_t afi,
 
 				/* Filter prefix using route-map */
 				ret = bgp_input_modifier(peer, &rn->p, &attr,
-						afi, safi, rmap_name, NULL, 0);
+						afi, safi, rmap_name, NULL, 0,
+						NULL);
 
 				if (type == bgp_show_adj_route_filtered &&
 					!route_filtered && ret != RMAP_DENY) {
@@ -11926,6 +11957,32 @@ uint8_t bgp_distance_apply(struct prefix *p, struct bgp_path_info *pinfo,
 	}
 }
 
+/* If we enter `distance bgp (1-255) (1-255) (1-255)`,
+ * we should tell ZEBRA update the routes for a specific
+ * AFI/SAFI to reflect changes in RIB.
+ */
+static void bgp_announce_routes_distance_update(struct bgp *bgp,
+						afi_t update_afi,
+						safi_t update_safi)
+{
+	afi_t afi;
+	safi_t safi;
+
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (!bgp_fibupd_safi(safi))
+			continue;
+
+		if (afi != update_afi && safi != update_safi)
+			continue;
+
+		if (BGP_DEBUG(zebra, ZEBRA))
+			zlog_debug(
+				"%s: Announcing routes due to distance change afi/safi (%d/%d)",
+				__func__, afi, safi);
+		bgp_zebra_announce_table(bgp, afi, safi);
+	}
+}
+
 DEFUN (bgp_distance,
        bgp_distance_cmd,
        "distance bgp (1-255) (1-255) (1-255)",
@@ -11939,15 +11996,23 @@ DEFUN (bgp_distance,
 	int idx_number = 2;
 	int idx_number_2 = 3;
 	int idx_number_3 = 4;
+	int distance_ebgp = atoi(argv[idx_number]->arg);
+	int distance_ibgp = atoi(argv[idx_number_2]->arg);
+	int distance_local = atoi(argv[idx_number_3]->arg);
 	afi_t afi;
 	safi_t safi;
 
 	afi = bgp_node_afi(vty);
 	safi = bgp_node_safi(vty);
 
-	bgp->distance_ebgp[afi][safi] = atoi(argv[idx_number]->arg);
-	bgp->distance_ibgp[afi][safi] = atoi(argv[idx_number_2]->arg);
-	bgp->distance_local[afi][safi] = atoi(argv[idx_number_3]->arg);
+	if (bgp->distance_ebgp[afi][safi] != distance_ebgp
+	    || bgp->distance_ibgp[afi][safi] != distance_ibgp
+	    || bgp->distance_local[afi][safi] != distance_local) {
+		bgp->distance_ebgp[afi][safi] = distance_ebgp;
+		bgp->distance_ibgp[afi][safi] = distance_ibgp;
+		bgp->distance_local[afi][safi] = distance_local;
+		bgp_announce_routes_distance_update(bgp, afi, safi);
+	}
 	return CMD_SUCCESS;
 }
 
@@ -11968,9 +12033,14 @@ DEFUN (no_bgp_distance,
 	afi = bgp_node_afi(vty);
 	safi = bgp_node_safi(vty);
 
-	bgp->distance_ebgp[afi][safi] = 0;
-	bgp->distance_ibgp[afi][safi] = 0;
-	bgp->distance_local[afi][safi] = 0;
+	if (bgp->distance_ebgp[afi][safi] != 0
+	    || bgp->distance_ibgp[afi][safi] != 0
+	    || bgp->distance_local[afi][safi] != 0) {
+		bgp->distance_ebgp[afi][safi] = 0;
+		bgp->distance_ibgp[afi][safi] = 0;
+		bgp->distance_local[afi][safi] = 0;
+		bgp_announce_routes_distance_update(bgp, afi, safi);
+	}
 	return CMD_SUCCESS;
 }
 
@@ -12115,6 +12185,12 @@ DEFUN (bgp_damp_set,
 		max = 4 * half;
 	}
 
+	/*
+	 * These can't be 0 but our SA doesn't understand the
+	 * way our cli is constructed
+	 */
+	assert(reuse);
+	assert(half);
 	if (suppress < reuse) {
 		vty_out(vty,
 			"Suppress value cannot be less than reuse value \n");
@@ -12199,7 +12275,7 @@ static int bgp_clear_damp_route(struct vty *vty, const char *view_name,
 						pi_temp = pi->next;
 						bgp_damp_info_free(
 							pi->extra->damp_info,
-							1);
+							1, afi, safi);
 						pi = pi_temp;
 					} else
 						pi = pi->next;
@@ -12219,7 +12295,7 @@ static int bgp_clear_damp_route(struct vty *vty, const char *view_name,
 						pi_temp = pi->next;
 						bgp_damp_info_free(
 							pi->extra->damp_info,
-							1);
+							1, afi, safi);
 						pi = pi_temp;
 					} else
 						pi = pi->next;
@@ -12241,7 +12317,7 @@ DEFUN (clear_ip_bgp_dampening,
        BGP_STR
        "Clear route flap dampening information\n")
 {
-	bgp_damp_info_clean();
+	bgp_damp_info_clean(AFI_IP, SAFI_UNICAST);
 	return CMD_SUCCESS;
 }
 

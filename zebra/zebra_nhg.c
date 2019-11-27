@@ -360,6 +360,8 @@ bool zebra_nhg_hash_equal(const void *arg1, const void *arg2)
 {
 	const struct nhg_hash_entry *nhe1 = arg1;
 	const struct nhg_hash_entry *nhe2 = arg2;
+	struct nexthop *nexthop1;
+	struct nexthop *nexthop2;
 
 	/* No matter what if they equal IDs, assume equal */
 	if (nhe1->id && nhe2->id && (nhe1->id == nhe2->id))
@@ -371,12 +373,47 @@ bool zebra_nhg_hash_equal(const void *arg1, const void *arg2)
 	if (nhe1->afi != nhe2->afi)
 		return false;
 
-	if (nexthop_group_active_nexthop_num_no_recurse(nhe1->nhg)
-	    != nexthop_group_active_nexthop_num_no_recurse(nhe2->nhg))
-		return false;
+	/* Nexthops should be sorted */
+	for (nexthop1 = nhe1->nhg->nexthop, nexthop2 = nhe2->nhg->nexthop;
+	     nexthop1 || nexthop2;
+	     nexthop1 = nexthop1->next, nexthop2 = nexthop2->next) {
+		if (nexthop1 && !nexthop2)
+			return false;
 
-	if (!nexthop_group_equal_no_recurse(nhe1->nhg, nhe2->nhg))
-		return false;
+		if (!nexthop1 && nexthop2)
+			return false;
+
+		/*
+		 * We have to check the active flag of each individual one,
+		 * not just the overall active_num. This solves the special case
+		 * issue of a route with a nexthop group with one nexthop
+		 * resolving to itself and thus marking it inactive. If we
+		 * have two different routes each wanting to mark a different
+		 * nexthop inactive, they need to hash to two different groups.
+		 *
+		 * If we just hashed on num_active, they would hash the same
+		 * which is incorrect.
+		 *
+		 * ex)
+		 *      1.1.1.0/24
+		 *           -> 1.1.1.1 dummy1 (inactive)
+		 *           -> 1.1.2.1 dummy2
+		 *
+		 *      1.1.2.0/24
+		 *           -> 1.1.1.1 dummy1
+		 *           -> 1.1.2.1 dummy2 (inactive)
+		 *
+		 * Without checking each individual one, they would hash to
+		 * the same group and both have 1.1.1.1 dummy1 marked inactive.
+		 *
+		 */
+		if (CHECK_FLAG(nexthop1->flags, NEXTHOP_FLAG_ACTIVE)
+		    != CHECK_FLAG(nexthop2->flags, NEXTHOP_FLAG_ACTIVE))
+			return false;
+
+		if (!nexthop_same(nexthop1, nexthop2))
+			return false;
+	}
 
 	return true;
 }
@@ -552,20 +589,6 @@ zebra_nhg_find_nexthop(uint32_t id, struct nexthop *nh, afi_t afi, int type)
 	return nhe;
 }
 
-static struct nhg_ctx *nhg_ctx_new()
-{
-	struct nhg_ctx *new = NULL;
-
-	new = XCALLOC(MTYPE_NHG_CTX, sizeof(struct nhg_ctx));
-
-	return new;
-}
-
-static void nhg_ctx_free(struct nhg_ctx *ctx)
-{
-	XFREE(MTYPE_NHG_CTX, ctx);
-}
-
 static uint32_t nhg_ctx_get_id(const struct nhg_ctx *ctx)
 {
 	return ctx->id;
@@ -619,6 +642,36 @@ static uint8_t nhg_ctx_get_count(const struct nhg_ctx *ctx)
 static struct nh_grp *nhg_ctx_get_grp(struct nhg_ctx *ctx)
 {
 	return ctx->u.grp;
+}
+
+static struct nhg_ctx *nhg_ctx_new()
+{
+	struct nhg_ctx *new = NULL;
+
+	new = XCALLOC(MTYPE_NHG_CTX, sizeof(struct nhg_ctx));
+
+	return new;
+}
+
+static void nhg_ctx_free(struct nhg_ctx **ctx)
+{
+	struct nexthop *nh;
+
+	if (ctx == NULL)
+		return;
+
+	assert((*ctx) != NULL);
+
+	if (nhg_ctx_get_count(*ctx))
+		goto done;
+
+	nh = nhg_ctx_get_nh(*ctx);
+
+	nexthop_del_labels(nh);
+
+done:
+	XFREE(MTYPE_NHG_CTX, *ctx);
+	*ctx = NULL;
 }
 
 static struct nhg_ctx *nhg_ctx_init(uint32_t id, struct nexthop *nh,
@@ -869,23 +922,13 @@ static int nhg_ctx_process_del(struct nhg_ctx *ctx)
 	return 0;
 }
 
-static void nhg_ctx_process_finish(struct nhg_ctx *ctx)
+static void nhg_ctx_fini(struct nhg_ctx **ctx)
 {
-	struct nexthop *nh;
-
 	/*
 	 * Just freeing for now, maybe do something more in the future
 	 * based on flag.
 	 */
 
-	if (nhg_ctx_get_count(ctx))
-		goto done;
-
-	nh = nhg_ctx_get_nh(ctx);
-
-	nexthop_del_labels(nh);
-
-done:
 	nhg_ctx_free(ctx);
 }
 
@@ -941,7 +984,7 @@ int nhg_ctx_process(struct nhg_ctx *ctx)
 
 	nhg_ctx_set_status(ctx, (ret ? NHG_CTX_FAILURE : NHG_CTX_SUCCESS));
 
-	nhg_ctx_process_finish(ctx);
+	nhg_ctx_fini(&ctx);
 
 	return ret;
 }
@@ -970,7 +1013,7 @@ int zebra_nhg_kernel_find(uint32_t id, struct nexthop *nh, struct nh_grp *grp,
 		return nhg_ctx_process(ctx);
 
 	if (queue_add(ctx)) {
-		nhg_ctx_process_finish(ctx);
+		nhg_ctx_fini(&ctx);
 		return -1;
 	}
 
@@ -987,7 +1030,7 @@ int zebra_nhg_kernel_del(uint32_t id)
 	nhg_ctx_set_op(ctx, NHG_CTX_OP_DEL);
 
 	if (queue_add(ctx)) {
-		nhg_ctx_process_finish(ctx);
+		nhg_ctx_fini(&ctx);
 		return -1;
 	}
 
@@ -999,6 +1042,9 @@ static struct nhg_hash_entry *depends_find(struct nexthop *nh, afi_t afi)
 {
 	struct nexthop *lookup = NULL;
 	struct nhg_hash_entry *nhe = NULL;
+
+	if (!nh)
+		goto done;
 
 	copy_nexthops(&lookup, nh, NULL);
 
@@ -1012,6 +1058,7 @@ static struct nhg_hash_entry *depends_find(struct nexthop *nh, afi_t afi)
 
 	nexthops_free(lookup);
 
+done:
 	return nhe;
 }
 
@@ -1628,10 +1675,13 @@ int nexthop_active_update(struct route_node *rn, struct route_entry *re)
 		new_active =
 			nexthop_active_check(rn, re, nexthop);
 
-		if (new_active
-		    && nexthop_group_active_nexthop_num(&new_grp)
-			       >= zrouter.multipath_num) {
-			UNSET_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE);
+		if (new_active && curr_active >= zrouter.multipath_num) {
+			struct nexthop *nh;
+
+			/* Set it and its resolved nexthop as inactive. */
+			for (nh = nexthop; nh; nh = nh->resolved)
+				UNSET_FLAG(nh->flags, NEXTHOP_FLAG_ACTIVE);
+
 			new_active = 0;
 		}
 

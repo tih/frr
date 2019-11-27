@@ -43,6 +43,7 @@
 #include "bgpd/bgp_fsm.h"
 #include "bgpd/bgp_zebra.h"
 #include "bgpd/bgp_flowspec_util.h"
+#include "bgpd/bgp_evpn.h"
 
 extern struct zclient *zclient;
 
@@ -63,27 +64,6 @@ static int bgp_isvalid_labeled_nexthop(struct bgp_nexthop_cache *bnc)
 {
 	return (bgp_zebra_num_connects() == 0
 		|| (bnc && CHECK_FLAG(bnc->flags, BGP_NEXTHOP_LABELED_VALID)));
-}
-
-int bgp_find_nexthop(struct bgp_path_info *path, int connected)
-{
-	struct bgp_nexthop_cache *bnc = path->nexthop;
-
-	if (!bnc)
-		return 0;
-
-	/*
-	 * We are cheating here.  Views have no associated underlying
-	 * ability to detect nexthops.  So when we have a view
-	 * just tell everyone the nexthop is valid
-	 */
-	if (path->peer && path->peer->bgp->inst_type == BGP_INSTANCE_TYPE_VIEW)
-		return 1;
-
-	if (connected && !(CHECK_FLAG(bnc->flags, BGP_NEXTHOP_CONNECTED)))
-		return 0;
-
-	return (bgp_isvalid_nexthop(bnc));
 }
 
 static void bgp_unlink_nexthop_check(struct bgp_nexthop_cache *bnc)
@@ -793,6 +773,16 @@ static void evaluate_paths(struct bgp_nexthop_cache *bnc)
 		if (CHECK_FLAG(bnc->change_flags, BGP_NEXTHOP_METRIC_CHANGED)
 		    || CHECK_FLAG(bnc->change_flags, BGP_NEXTHOP_CHANGED))
 			SET_FLAG(path->flags, BGP_PATH_IGP_CHANGED);
+
+		if (safi == SAFI_EVPN &&
+		    bgp_evpn_is_prefix_nht_supported(&rn->p)) {
+			if (CHECK_FLAG(path->flags, BGP_PATH_VALID))
+				bgp_evpn_import_route(bgp_path, afi, safi,
+						      &rn->p, path);
+			else
+				bgp_evpn_unimport_route(bgp_path, afi, safi,
+							&rn->p, path);
+		}
 
 		bgp_process(bgp_path, rn, afi, safi);
 	}

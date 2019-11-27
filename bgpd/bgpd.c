@@ -2562,6 +2562,30 @@ int peer_group_remote_as(struct bgp *bgp, const char *group_name, as_t *as,
 	return 0;
 }
 
+int peer_notify_unconfig(struct peer *peer)
+{
+	if (BGP_IS_VALID_STATE_FOR_NOTIF(peer->status))
+		bgp_notify_send(peer, BGP_NOTIFY_CEASE,
+				BGP_NOTIFY_CEASE_PEER_UNCONFIG);
+	return 0;
+}
+
+int peer_group_notify_unconfig(struct peer_group *group)
+{
+	struct peer *peer, *other;
+	struct listnode *node, *nnode;
+
+	for (ALL_LIST_ELEMENTS(group->peer, node, nnode, peer)) {
+		other = peer->doppelganger;
+		if (other && other->status != Deleted) {
+			other->group = NULL;
+			peer_notify_unconfig(other);
+		} else
+			peer_notify_unconfig(peer);
+	}
+	return 0;
+}
+
 int peer_group_delete(struct peer_group *group)
 {
 	struct bgp *bgp;
@@ -6533,16 +6557,17 @@ int is_ebgp_multihop_configured(struct peer *peer)
 	if (CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP)) {
 		group = peer->group;
 		if ((peer_sort(peer) != BGP_PEER_IBGP)
-		    && (group->conf->ttl != 1))
+		    && (group->conf->ttl != BGP_DEFAULT_TTL))
 			return 1;
 
 		for (ALL_LIST_ELEMENTS(group->peer, node, nnode, peer1)) {
 			if ((peer_sort(peer1) != BGP_PEER_IBGP)
-			    && (peer1->ttl != 1))
+			    && (peer1->ttl != BGP_DEFAULT_TTL))
 				return 1;
 		}
 	} else {
-		if ((peer_sort(peer) != BGP_PEER_IBGP) && (peer->ttl != 1))
+		if ((peer_sort(peer) != BGP_PEER_IBGP)
+		    && (peer->ttl != BGP_DEFAULT_TTL))
 			return 1;
 	}
 	return 0;
@@ -7085,7 +7110,7 @@ static void bgp_config_write_peer_global(struct vty *vty, struct bgp *bgp,
 		vty_out(vty, " neighbor %s passive\n", addr);
 
 	/* ebgp-multihop */
-	if (peer->sort != BGP_PEER_IBGP && peer->ttl != 1
+	if (peer->sort != BGP_PEER_IBGP && peer->ttl != BGP_DEFAULT_TTL
 	    && !(peer->gtsm_hops != 0 && peer->ttl == MAXTTL)) {
 		if (!peer_group_active(peer) || g_peer->ttl != peer->ttl) {
 			vty_out(vty, " neighbor %s ebgp-multihop %d\n", addr,
@@ -7265,6 +7290,11 @@ static void bgp_config_write_peer_af(struct vty *vty, struct bgp *bgp,
 			vty_out(vty, " receive");
 		vty_out(vty, "\n");
 	}
+
+	/* BGP flag dampening. */
+	if (CHECK_FLAG(bgp->af_flags[afi][safi],
+		       BGP_CONFIG_DAMPENING))
+		bgp_config_write_damp(vty, afi, safi);
 
 	/* Route reflector client. */
 	if (peergroup_af_flag_check(peer, afi, safi,
@@ -7738,11 +7768,6 @@ int bgp_config_write(struct vty *vty)
 				bgp_flag_check(bgp, BGP_FLAG_IMPORT_CHECK)
 					? ""
 					: "no ");
-
-		/* BGP flag dampening. */
-		if (CHECK_FLAG(bgp->af_flags[AFI_IP][SAFI_UNICAST],
-			       BGP_CONFIG_DAMPENING))
-			bgp_config_write_damp(vty);
 
 		/* BGP timers configuration. */
 		if (bgp->default_keepalive != BGP_DEFAULT_KEEPALIVE
