@@ -65,12 +65,9 @@ uint8_t *readbuff = NULL;
  * ISO 10589 - 8.4.8
  */
 
-uint8_t ALL_L1_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x14};
-uint8_t ALL_L2_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x15};
-uint8_t ALL_ISS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x05};
-uint8_t ALL_ESS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x04};
-
-static char sock_buff[8192];
+static const uint8_t ALL_L1_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x14};
+static const uint8_t ALL_L2_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x15};
+static char sock_buff[16384];
 
 static int open_bpf_dev(struct isis_circuit *circuit)
 {
@@ -212,7 +209,7 @@ int isis_sock_init(struct isis_circuit *circuit)
 
 int isis_recv_pdu_bcast(struct isis_circuit *circuit, uint8_t *ssnpa)
 {
-	int bytesread = 0, bytestoread, offset, one = 1;
+	int bytesread = 0, bytestoread = 0, offset, one = 1;
 	uint8_t *buff_ptr;
 	struct bpf_hdr *bpf_hdr;
 
@@ -270,8 +267,7 @@ int isis_send_pdu_bcast(struct isis_circuit *circuit, int level)
 	buflen = stream_get_endp(circuit->snd_stream) + LLC_LEN + ETHER_HDR_LEN;
 	if (buflen > sizeof(sock_buff)) {
 		zlog_warn(
-			"isis_send_pdu_bcast: sock_buff size %zu is less than "
-			"output pdu size %zu on circuit %s",
+			"isis_send_pdu_bcast: sock_buff size %zu is less than output pdu size %zu on circuit %s",
 			sizeof(sock_buff), buflen, circuit->interface->name);
 		return ISIS_WARNING;
 	}

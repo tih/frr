@@ -26,7 +26,7 @@
 #include "log.h"
 #include "lib_errors.h"
 
-DEFINE_MTYPE_STATIC(LIB, ZEROMQ_CB, "ZeroMQ callback")
+DEFINE_MTYPE_STATIC(LIB, ZEROMQ_CB, "ZeroMQ callback");
 
 /* libzmq's context */
 void *frrzmq_context = NULL;
@@ -135,9 +135,8 @@ static int frrzmq_read_msg(struct thread *t)
 	if (read)
 		frrzmq_check_events(cbp, &cb->write, ZMQ_POLLOUT);
 
-	funcname_thread_add_read_write(
-		THREAD_READ, t->master, frrzmq_read_msg, cbp, cb->fd,
-		&cb->read.thread, t->funcname, t->schedfrom, t->schedfrom_line);
+	thread_add_read(t->master, frrzmq_read_msg, cbp,
+			cb->fd, &cb->read.thread);
 	return 0;
 
 out_err:
@@ -148,14 +147,14 @@ out_err:
 	return 1;
 }
 
-int funcname_frrzmq_thread_add_read(struct thread_master *master,
-				    void (*msgfunc)(void *arg, void *zmqsock),
-				    void (*partfunc)(void *arg, void *zmqsock,
-						     zmq_msg_t *msg,
-						     unsigned partnum),
-				    void (*errfunc)(void *arg, void *zmqsock),
-				    void *arg, void *zmqsock,
-				    struct frrzmq_cb **cbp, debugargdef)
+int _frrzmq_thread_add_read(const struct xref_threadsched *xref,
+			    struct thread_master *master,
+			    void (*msgfunc)(void *arg, void *zmqsock),
+			    void (*partfunc)(void *arg, void *zmqsock,
+					     zmq_msg_t *msg, unsigned partnum),
+			    void (*errfunc)(void *arg, void *zmqsock),
+			    void *arg, void *zmqsock,
+			    struct frrzmq_cb **cbp)
 {
 	int fd, events;
 	size_t len;
@@ -177,7 +176,7 @@ int funcname_frrzmq_thread_add_read(struct thread_master *master,
 	else {
 		cb = XCALLOC(MTYPE_ZEROMQ_CB, sizeof(struct frrzmq_cb));
 
-		cb->write.cancelled = 1;
+		cb->write.cancelled = true;
 		*cbp = cb;
 	}
 
@@ -187,20 +186,16 @@ int funcname_frrzmq_thread_add_read(struct thread_master *master,
 	cb->read.cb_msg = msgfunc;
 	cb->read.cb_part = partfunc;
 	cb->read.cb_error = errfunc;
-	cb->read.cancelled = 0;
+	cb->read.cancelled = false;
 
 	if (events & ZMQ_POLLIN) {
-		if (cb->read.thread) {
-			thread_cancel(cb->read.thread);
-			cb->read.thread = NULL;
-		}
-		funcname_thread_add_event(master, frrzmq_read_msg, cbp, fd,
-					  &cb->read.thread, funcname, schedfrom,
-					  fromln);
+		thread_cancel(&cb->read.thread);
+
+		thread_add_event(master, frrzmq_read_msg, cbp, fd,
+				  &cb->read.thread);
 	} else
-		funcname_thread_add_read_write(
-			THREAD_READ, master, frrzmq_read_msg, cbp, fd,
-			&cb->read.thread, funcname, schedfrom, fromln);
+		thread_add_read(master, frrzmq_read_msg, cbp, fd,
+				&cb->read.thread);
 	return 0;
 }
 
@@ -246,10 +241,8 @@ static int frrzmq_write_msg(struct thread *t)
 	if (written)
 		frrzmq_check_events(cbp, &cb->read, ZMQ_POLLIN);
 
-	funcname_thread_add_read_write(THREAD_WRITE, t->master,
-				       frrzmq_write_msg, cbp, cb->fd,
-				       &cb->write.thread, t->funcname,
-				       t->schedfrom, t->schedfrom_line);
+	thread_add_write(t->master, frrzmq_write_msg, cbp,
+			 cb->fd, &cb->write.thread);
 	return 0;
 
 out_err:
@@ -259,11 +252,12 @@ out_err:
 		cb->write.cb_error(cb->write.arg, cb->zmqsock);
 	return 1;
 }
-int funcname_frrzmq_thread_add_write(struct thread_master *master,
-				     void (*msgfunc)(void *arg, void *zmqsock),
-				     void (*errfunc)(void *arg, void *zmqsock),
-				     void *arg, void *zmqsock,
-				     struct frrzmq_cb **cbp, debugargdef)
+
+int _frrzmq_thread_add_write(const struct xref_threadsched *xref,
+			     struct thread_master *master,
+			     void (*msgfunc)(void *arg, void *zmqsock),
+			     void (*errfunc)(void *arg, void *zmqsock),
+			     void *arg, void *zmqsock, struct frrzmq_cb **cbp)
 {
 	int fd, events;
 	size_t len;
@@ -285,7 +279,7 @@ int funcname_frrzmq_thread_add_write(struct thread_master *master,
 	else {
 		cb = XCALLOC(MTYPE_ZEROMQ_CB, sizeof(struct frrzmq_cb));
 
-		cb->read.cancelled = 1;
+		cb->read.cancelled = true;
 		*cbp = cb;
 	}
 
@@ -295,20 +289,16 @@ int funcname_frrzmq_thread_add_write(struct thread_master *master,
 	cb->write.cb_msg = msgfunc;
 	cb->write.cb_part = NULL;
 	cb->write.cb_error = errfunc;
-	cb->write.cancelled = 0;
+	cb->write.cancelled = false;
 
 	if (events & ZMQ_POLLOUT) {
-		if (cb->write.thread) {
-			thread_cancel(cb->write.thread);
-			cb->write.thread = NULL;
-		}
-		funcname_thread_add_event(master, frrzmq_write_msg, cbp, fd,
-					  &cb->write.thread, funcname,
-					  schedfrom, fromln);
+		thread_cancel(&cb->write.thread);
+
+		_thread_add_event(xref, master, frrzmq_write_msg, cbp, fd,
+				  &cb->write.thread);
 	} else
-		funcname_thread_add_read_write(
-			THREAD_WRITE, master, frrzmq_write_msg, cbp, fd,
-			&cb->write.thread, funcname, schedfrom, fromln);
+		thread_add_write(master, frrzmq_write_msg, cbp, fd,
+				 &cb->write.thread);
 	return 0;
 }
 
@@ -316,13 +306,11 @@ void frrzmq_thread_cancel(struct frrzmq_cb **cb, struct cb_core *core)
 {
 	if (!cb || !*cb)
 		return;
-	core->cancelled = 1;
-	if (core->thread) {
-		thread_cancel(core->thread);
-		core->thread = NULL;
-	}
+	core->cancelled = true;
+	thread_cancel(&core->thread);
+
 	if ((*cb)->read.cancelled && !(*cb)->read.thread
-	    && (*cb)->write.cancelled && (*cb)->write.thread)
+	    && (*cb)->write.cancelled && !(*cb)->write.thread)
 		XFREE(MTYPE_ZEROMQ_CB, *cb);
 }
 
@@ -342,12 +330,16 @@ void frrzmq_check_events(struct frrzmq_cb **cbp, struct cb_core *core,
 	len = sizeof(events);
 	if (zmq_getsockopt(cb->zmqsock, ZMQ_EVENTS, &events, &len))
 		return;
-	if (events & event && core->thread && !core->cancelled) {
+	if ((events & event) && core->thread && !core->cancelled) {
 		struct thread_master *tm = core->thread->master;
-		thread_cancel(core->thread);
-		core->thread = NULL;
-		thread_add_event(tm, (event == ZMQ_POLLIN ? frrzmq_read_msg
-							  : frrzmq_write_msg),
-				 cbp, cb->fd, &core->thread);
+
+		thread_cancel(&core->thread);
+
+		if (event == ZMQ_POLLIN)
+			thread_add_event(tm, frrzmq_read_msg,
+					 cbp, cb->fd, &core->thread);
+		else
+			thread_add_event(tm, frrzmq_write_msg,
+					 cbp, cb->fd, &core->thread);
 	}
 }

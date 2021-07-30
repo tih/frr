@@ -75,9 +75,8 @@ static int pim_zebra_interface_vrf_update(ZAPI_CALLBACK_ARGS)
 		return 0;
 
 	if (PIM_DEBUG_ZEBRA)
-		zlog_debug("%s: %s updating from %u to %u",
-			   __PRETTY_FUNCTION__,
-			   ifp->name, vrf_id, new_vrf_id);
+		zlog_debug("%s: %s updating from %u to %u", __func__, ifp->name,
+			   vrf_id, new_vrf_id);
 
 	if_update_to_new_vrf(ifp, new_vrf_id);
 
@@ -90,8 +89,8 @@ static void dump_if_address(struct interface *ifp)
 	struct connected *ifc;
 	struct listnode *node;
 
-	zlog_debug("%s %s: interface %s addresses:", __FILE__,
-		   __PRETTY_FUNCTION__, ifp->name);
+	zlog_debug("%s %s: interface %s addresses:", __FILE__, __func__,
+		   ifp->name);
 
 	for (ALL_LIST_ELEMENTS_RO(ifp->connected, node, ifc)) {
 		struct prefix *p = ifc->address;
@@ -99,9 +98,8 @@ static void dump_if_address(struct interface *ifp)
 		if (p->family != AF_INET)
 			continue;
 
-		zlog_debug("%s %s: interface %s address %s %s", __FILE__,
-			   __PRETTY_FUNCTION__, ifp->name,
-			   inet_ntoa(p->u.prefix4),
+		zlog_debug("%s %s: interface %s address %pI4 %s", __FILE__,
+			   __func__, ifp->name, &p->u.prefix4,
 			   CHECK_FLAG(ifc->flags, ZEBRA_IFA_SECONDARY)
 				   ? "secondary"
 				   : "primary");
@@ -132,11 +130,8 @@ static int pim_zebra_if_address_add(ZAPI_CALLBACK_ARGS)
 	p = c->address;
 
 	if (PIM_DEBUG_ZEBRA) {
-		char buf[BUFSIZ];
-		prefix2str(p, buf, BUFSIZ);
-		zlog_debug("%s: %s(%u) connected IP address %s flags %u %s",
-			   __PRETTY_FUNCTION__, c->ifp->name, vrf_id, buf,
-			   c->flags,
+		zlog_debug("%s: %s(%u) connected IP address %pFX flags %u %s",
+			   __func__, c->ifp->name, vrf_id, p, c->flags,
 			   CHECK_FLAG(c->flags, ZEBRA_IFA_SECONDARY)
 				   ? "secondary"
 				   : "primary");
@@ -152,17 +147,10 @@ static int pim_zebra_if_address_add(ZAPI_CALLBACK_ARGS)
 		struct in_addr primary_addr = pim_find_primary_addr(c->ifp);
 		if (p->family != AF_INET
 		    || primary_addr.s_addr != p->u.prefix4.s_addr) {
-			if (PIM_DEBUG_ZEBRA) {
-				/* but we had a primary address already */
-
-				char buf[BUFSIZ];
-
-				prefix2str(p, buf, BUFSIZ);
-
+			if (PIM_DEBUG_ZEBRA)
 				zlog_warn(
-					"%s: %s : forcing secondary flag on %s",
-					__PRETTY_FUNCTION__, c->ifp->name, buf);
-			}
+					"%s: %s : forcing secondary flag on %pFX",
+					__func__, c->ifp->name, p);
 			SET_FLAG(c->flags, ZEBRA_IFA_SECONDARY);
 		}
 	}
@@ -214,12 +202,9 @@ static int pim_zebra_if_address_del(ZAPI_CALLBACK_ARGS)
 	p = c->address;
 	if (p->family == AF_INET) {
 		if (PIM_DEBUG_ZEBRA) {
-			char buf[BUFSIZ];
-			prefix2str(p, buf, BUFSIZ);
 			zlog_debug(
-				"%s: %s(%u) disconnected IP address %s flags %u %s",
-				__PRETTY_FUNCTION__, c->ifp->name, vrf_id, buf,
-				c->flags,
+				"%s: %s(%u) disconnected IP address %pFX flags %u %s",
+				__func__, c->ifp->name, vrf_id, p, c->flags,
 				CHECK_FLAG(c->flags, ZEBRA_IFA_SECONDARY)
 					? "secondary"
 					: "primary");
@@ -272,7 +257,7 @@ void pim_zebra_upstream_rpf_changed(struct pim_instance *pim,
 		nbr = pim_neighbor_find(old->source_nexthop.interface,
 					old->rpf_addr.u.prefix4);
 		if (nbr)
-			pim_jp_agg_remove_group(nbr->upstream_jp_agg, up);
+			pim_jp_agg_remove_group(nbr->upstream_jp_agg, up, nbr);
 
 		/*
 		 * We have detected a case where we might need
@@ -290,8 +275,8 @@ void pim_zebra_upstream_rpf_changed(struct pim_instance *pim,
 			 * so install it.
 			 */
 			if (!up->channel_oil->installed)
-				pim_mroute_add(up->channel_oil,
-					__PRETTY_FUNCTION__);
+				pim_upstream_mroute_add(up->channel_oil,
+							__func__);
 
 			/*
 			 * RFC 4601: 4.5.7.  Sending (S,G)
@@ -325,8 +310,11 @@ void pim_zebra_upstream_rpf_changed(struct pim_instance *pim,
 			up->channel_oil->oil_inherited_rescan = 0;
 		}
 
+		if (up->join_state == PIM_UPSTREAM_JOINED)
+			pim_jp_agg_switch_interface(old, &up->rpf, up);
+
 		if (!up->channel_oil->installed)
-			pim_mroute_add(up->channel_oil, __PRETTY_FUNCTION__);
+			pim_upstream_mroute_add(up->channel_oil, __func__);
 	}
 
 	/* FIXME can join_desired actually be changed by pim_rpf_update()
@@ -386,138 +374,15 @@ static void pim_zebra_vxlan_replay(void)
 	zclient_send_message(zclient);
 }
 
-void pim_scan_individual_oil(struct channel_oil *c_oil, int in_vif_index)
-{
-	struct in_addr vif_source;
-	int input_iface_vif_index;
-
-	pim_rp_set_upstream_addr(c_oil->pim, &vif_source,
-				      c_oil->oil.mfcc_origin,
-				      c_oil->oil.mfcc_mcastgrp);
-
-	if (in_vif_index)
-		input_iface_vif_index = in_vif_index;
-	else {
-		struct prefix src, grp;
-
-		src.family = AF_INET;
-		src.prefixlen = IPV4_MAX_BITLEN;
-		src.u.prefix4 = vif_source;
-		grp.family = AF_INET;
-		grp.prefixlen = IPV4_MAX_BITLEN;
-		grp.u.prefix4 = c_oil->oil.mfcc_mcastgrp;
-
-		if (PIM_DEBUG_ZEBRA) {
-			char source_str[INET_ADDRSTRLEN];
-			char group_str[INET_ADDRSTRLEN];
-			pim_inet4_dump("<source?>", c_oil->oil.mfcc_origin,
-				       source_str, sizeof(source_str));
-			pim_inet4_dump("<group?>", c_oil->oil.mfcc_mcastgrp,
-				       group_str, sizeof(group_str));
-			zlog_debug(
-				"%s: channel_oil (%s,%s) upstream info is not present.",
-				__PRETTY_FUNCTION__, source_str, group_str);
-		}
-		input_iface_vif_index = pim_ecmp_fib_lookup_if_vif_index(
-			c_oil->pim, &src, &grp);
-	}
-
-	if (input_iface_vif_index < 1) {
-		if (PIM_DEBUG_ZEBRA) {
-			char source_str[INET_ADDRSTRLEN];
-			char group_str[INET_ADDRSTRLEN];
-			pim_inet4_dump("<source?>", c_oil->oil.mfcc_origin,
-				       source_str, sizeof(source_str));
-			pim_inet4_dump("<group?>", c_oil->oil.mfcc_mcastgrp,
-				       group_str, sizeof(group_str));
-			zlog_debug(
-				"%s %s: could not find input interface(%d) for (S,G)=(%s,%s)",
-				__FILE__, __PRETTY_FUNCTION__,
-				c_oil->oil.mfcc_parent, source_str, group_str);
-		}
-		pim_mroute_del(c_oil, __PRETTY_FUNCTION__);
-		return;
-	}
-
-	if (input_iface_vif_index == c_oil->oil.mfcc_parent) {
-		if (!c_oil->installed)
-			pim_mroute_add(c_oil, __PRETTY_FUNCTION__);
-
-		/* RPF unchanged */
-		return;
-	}
-
-	if (PIM_DEBUG_ZEBRA) {
-		struct interface *old_iif = pim_if_find_by_vif_index(
-			c_oil->pim, c_oil->oil.mfcc_parent);
-		struct interface *new_iif = pim_if_find_by_vif_index(
-			c_oil->pim, input_iface_vif_index);
-		char source_str[INET_ADDRSTRLEN];
-		char group_str[INET_ADDRSTRLEN];
-		pim_inet4_dump("<source?>", c_oil->oil.mfcc_origin, source_str,
-			       sizeof(source_str));
-		pim_inet4_dump("<group?>", c_oil->oil.mfcc_mcastgrp, group_str,
-			       sizeof(group_str));
-		zlog_debug(
-			"%s %s: (S,G)=(%s,%s) input interface changed from %s vif_index=%d to %s vif_index=%d",
-			__FILE__, __PRETTY_FUNCTION__, source_str, group_str,
-			(old_iif) ? old_iif->name : "<old_iif?>",
-			c_oil->oil.mfcc_parent,
-			(new_iif) ? new_iif->name : "<new_iif?>",
-			input_iface_vif_index);
-	}
-
-	/* new iif loops to existing oif ? */
-	if (c_oil->oil.mfcc_ttls[input_iface_vif_index]) {
-		struct interface *new_iif = pim_if_find_by_vif_index(
-			c_oil->pim, input_iface_vif_index);
-
-		if (PIM_DEBUG_ZEBRA) {
-			char source_str[INET_ADDRSTRLEN];
-			char group_str[INET_ADDRSTRLEN];
-			pim_inet4_dump("<source?>", c_oil->oil.mfcc_origin,
-				       source_str, sizeof(source_str));
-			pim_inet4_dump("<group?>", c_oil->oil.mfcc_mcastgrp,
-				       group_str, sizeof(group_str));
-			zlog_debug(
-				"%s %s: (S,G)=(%s,%s) new iif loops to existing oif: %s vif_index=%d",
-				__FILE__, __PRETTY_FUNCTION__, source_str,
-				group_str,
-				(new_iif) ? new_iif->name : "<new_iif?>",
-				input_iface_vif_index);
-		}
-	}
-
-	/* update iif vif_index */
-	pim_channel_oil_change_iif(c_oil->pim, c_oil, input_iface_vif_index,
-				   __PRETTY_FUNCTION__);
-	pim_mroute_add(c_oil, __PRETTY_FUNCTION__);
-}
-
 void pim_scan_oil(struct pim_instance *pim)
 {
-	struct listnode *node;
-	struct listnode *nextnode;
 	struct channel_oil *c_oil;
-	ifindex_t ifindex;
-	int vif_index = 0;
 
 	pim->scan_oil_last = pim_time_monotonic_sec();
 	++pim->scan_oil_events;
 
-	for (ALL_LIST_ELEMENTS(pim->channel_oil_list, node, nextnode, c_oil)) {
-		if (c_oil->up && c_oil->up->rpf.source_nexthop.interface) {
-			ifindex = c_oil->up->rpf.source_nexthop
-					  .interface->ifindex;
-			vif_index =
-				pim_if_find_vifindex_by_ifindex(pim, ifindex);
-			/* Pass Current selected NH vif index to mroute
-			 * download */
-			if (vif_index)
-				pim_scan_individual_oil(c_oil, vif_index);
-		} else
-			pim_scan_individual_oil(c_oil, 0);
-	}
+	frr_each (rb_pim_oil, &pim->channel_oil_head, c_oil)
+		pim_upstream_mroute_iif_update(c_oil, __func__);
 }
 
 static int on_rpf_cache_refresh(struct thread *t)
@@ -549,7 +414,7 @@ void sched_rpf_cache_refresh(struct pim_instance *pim)
 	/* Start refresh timer */
 
 	if (PIM_DEBUG_ZEBRA) {
-		zlog_debug("%s: triggering %ld msec timer", __PRETTY_FUNCTION__,
+		zlog_debug("%s: triggering %ld msec timer", __func__,
 			   router->rpf_cache_refresh_delay_msec);
 	}
 
@@ -571,7 +436,7 @@ static void pim_zebra_connected(struct zclient *zclient)
 
 static void pim_zebra_capabilities(struct zclient_capabilities *cap)
 {
-	router->role = cap->role;
+	router->mlag_role = cap->role;
 }
 
 void pim_zebra_init(void)
@@ -594,8 +459,7 @@ void pim_zebra_init(void)
 
 	zclient_init(zclient, ZEBRA_ROUTE_PIM, 0, &pimd_privs);
 	if (PIM_DEBUG_PIM_TRACE) {
-		zlog_notice("%s: zclient socket initialized",
-			    __PRETTY_FUNCTION__);
+		zlog_notice("%s: zclient socket initialized", __func__);
 	}
 
 	zclient_lookup_new();
@@ -607,13 +471,12 @@ void igmp_anysource_forward_start(struct pim_instance *pim,
 	struct igmp_source *source;
 	struct in_addr src_addr = {.s_addr = 0};
 	/* Any source (*,G) is forwarded only if mode is EXCLUDE {empty} */
-	zassert(group->group_filtermode_isexcl);
-	zassert(listcount(group->group_source_list) < 1);
+	assert(group->group_filtermode_isexcl);
+	assert(listcount(group->group_source_list) < 1);
 
 	source = source_new(group, src_addr);
 	if (!source) {
-		zlog_warn("%s: Failure to create * source",
-			  __PRETTY_FUNCTION__);
+		zlog_warn("%s: Failure to create * source", __func__);
 		return;
 	}
 
@@ -666,7 +529,8 @@ static void igmp_source_forward_reevaluate_one(struct pim_instance *pim,
 					"local membership add for %s as G is now ASM",
 					pim_str_sg_dump(&sg));
 			pim_ifchannel_local_membership_add(
-				group->group_igmp_sock->interface, &sg);
+				group->group_igmp_sock->interface, &sg,
+				false /*is_vxlan*/);
 		}
 	}
 }
@@ -722,8 +586,8 @@ void igmp_source_forward_start(struct pim_instance *pim,
 
 	if (PIM_DEBUG_IGMP_TRACE) {
 		zlog_debug(
-			"%s: (S,G)=%s igmp_sock=%d oif=%s fwd=%d",
-			__PRETTY_FUNCTION__, pim_str_sg_dump(&sg),
+			"%s: (S,G)=%s igmp_sock=%d oif=%s fwd=%d", __func__,
+			pim_str_sg_dump(&sg),
 			source->source_group->group_igmp_sock->fd,
 			source->source_group->group_igmp_sock->interface->name,
 			IGMP_SOURCE_TEST_FORWARDING(source->source_flags));
@@ -739,11 +603,10 @@ void igmp_source_forward_start(struct pim_instance *pim,
 	pim_oif = group->group_igmp_sock->interface->info;
 	if (!pim_oif) {
 		if (PIM_DEBUG_IGMP_TRACE) {
-			zlog_debug(
-				   "%s: multicast not enabled on oif=%s ?",
-				   __PRETTY_FUNCTION__,
+			zlog_debug("%s: multicast not enabled on oif=%s ?",
+				   __func__,
 				   source->source_group->group_igmp_sock
-				   ->interface->name);
+					   ->interface->name);
 		}
 		return;
 	}
@@ -757,8 +620,8 @@ void igmp_source_forward_start(struct pim_instance *pim,
 		if (!pim_rp_set_upstream_addr(pim, &vif_source,
 					      source->source_addr, sg.grp)) {
 			/*Create a dummy channel oil */
-			source->source_channel_oil = pim_channel_oil_add(
-				pim, &sg, MAXVIFS, __PRETTY_FUNCTION__);
+			source->source_channel_oil =
+				pim_channel_oil_add(pim, &sg, __func__);
 		}
 
 		else {
@@ -790,10 +653,10 @@ void igmp_source_forward_start(struct pim_instance *pim,
 
 				pim_inet4_dump("<source?>", vif_source, buf2,
 					       sizeof(buf2));
-				zlog_debug("%s: NHT %s vif_source %s vif_index:%d ",
-					__PRETTY_FUNCTION__,
-					pim_str_sg_dump(&sg),
-					buf2, input_iface_vif_index);
+				zlog_debug(
+					"%s: NHT %s vif_source %s vif_index:%d ",
+					__func__, pim_str_sg_dump(&sg), buf2,
+					input_iface_vif_index);
 			}
 
 			if (input_iface_vif_index < 1) {
@@ -803,14 +666,11 @@ void igmp_source_forward_start(struct pim_instance *pim,
 						source->source_addr,
 						source_str, sizeof(source_str));
 					zlog_debug(
-					    "%s %s: could not find input interface for source %s",
-					    __FILE__, __PRETTY_FUNCTION__,
-					    source_str);
+						"%s %s: could not find input interface for source %s",
+						__FILE__, __func__, source_str);
 				}
 				source->source_channel_oil =
-					pim_channel_oil_add(
-						pim, &sg, MAXVIFS,
-						__PRETTY_FUNCTION__);
+					pim_channel_oil_add(pim, &sg, __func__);
 			}
 
 			else {
@@ -828,30 +688,28 @@ void igmp_source_forward_start(struct pim_instance *pim,
 					 */
 					if (PIM_DEBUG_IGMP_TRACE) {
 						zlog_debug(
-						    "%s: ignoring request for looped MFC entry (S,G)=%s: igmp_sock=%d oif=%s vif_index=%d",
-						    __PRETTY_FUNCTION__,
-						    pim_str_sg_dump(&sg),
-						    source->source_group
-						    ->group_igmp_sock->fd,
-						    source->source_group
-						    ->group_igmp_sock
-						    ->interface->name,
-						    input_iface_vif_index);
+							"%s: ignoring request for looped MFC entry (S,G)=%s: igmp_sock=%d oif=%s vif_index=%d",
+							__func__,
+							pim_str_sg_dump(&sg),
+							source->source_group
+								->group_igmp_sock
+								->fd,
+							source->source_group
+								->group_igmp_sock
+								->interface->name,
+							input_iface_vif_index);
 					}
 					return;
 				}
 
 				source->source_channel_oil =
-					pim_channel_oil_add(
-						pim, &sg, input_iface_vif_index,
-						__PRETTY_FUNCTION__);
+					pim_channel_oil_add(pim, &sg, __func__);
 				if (!source->source_channel_oil) {
 					if (PIM_DEBUG_IGMP_TRACE) {
 						zlog_debug(
-						    "%s %s: could not create OIL for channel (S,G)=%s",
-						    __FILE__,
-						    __PRETTY_FUNCTION__,
-						    pim_str_sg_dump(&sg));
+							"%s %s: could not create OIL for channel (S,G)=%s",
+							__FILE__, __func__,
+							pim_str_sg_dump(&sg));
 					}
 					return;
 				}
@@ -859,10 +717,10 @@ void igmp_source_forward_start(struct pim_instance *pim,
 		}
 	}
 
-	if (PIM_I_am_DR(pim_oif)) {
+	if (PIM_I_am_DR(pim_oif) || PIM_I_am_DualActive(pim_oif)) {
 		result = pim_channel_add_oif(source->source_channel_oil,
 					     group->group_igmp_sock->interface,
-					     PIM_OIF_FLAG_PROTO_IGMP);
+					     PIM_OIF_FLAG_PROTO_IGMP, __func__);
 		if (result) {
 			if (PIM_DEBUG_MROUTE) {
 				zlog_warn("%s: add_oif() failed with return=%d",
@@ -872,10 +730,10 @@ void igmp_source_forward_start(struct pim_instance *pim,
 		}
 	} else {
 		if (PIM_DEBUG_IGMP_TRACE)
-			zlog_debug("%s: %s was received on %s interface but we are not DR for that interface",
-				   __PRETTY_FUNCTION__,
-				   pim_str_sg_dump(&sg),
-				   group->group_igmp_sock->interface->name);
+			zlog_debug(
+				"%s: %s was received on %s interface but we are not DR for that interface",
+				__func__, pim_str_sg_dump(&sg),
+				group->group_igmp_sock->interface->name);
 
 		return;
 	}
@@ -884,14 +742,15 @@ void igmp_source_forward_start(struct pim_instance *pim,
 	  per-interface (S,G) state.
 	 */
 	if (!pim_ifchannel_local_membership_add(
-						group->group_igmp_sock->interface, &sg)) {
+						group->group_igmp_sock->interface, &sg,
+						false /*is_vxlan*/)) {
 		if (PIM_DEBUG_MROUTE)
 			zlog_warn("%s: Failure to add local membership for %s",
-				  __PRETTY_FUNCTION__, pim_str_sg_dump(&sg));
+				  __func__, pim_str_sg_dump(&sg));
 
 		pim_channel_del_oif(source->source_channel_oil,
 				    group->group_igmp_sock->interface,
-				    PIM_OIF_FLAG_PROTO_IGMP);
+				    PIM_OIF_FLAG_PROTO_IGMP, __func__);
 		return;
 	}
 
@@ -914,8 +773,8 @@ void igmp_source_forward_stop(struct igmp_source *source)
 
 	if (PIM_DEBUG_IGMP_TRACE) {
 		zlog_debug(
-			"%s: (S,G)=%s igmp_sock=%d oif=%s fwd=%d",
-			__PRETTY_FUNCTION__, pim_str_sg_dump(&sg),
+			"%s: (S,G)=%s igmp_sock=%d oif=%s fwd=%d", __func__,
+			pim_str_sg_dump(&sg),
 			source->source_group->group_igmp_sock->fd,
 			source->source_group->group_igmp_sock->interface->name,
 			IGMP_SOURCE_TEST_FORWARDING(source->source_flags));
@@ -942,7 +801,8 @@ void igmp_source_forward_stop(struct igmp_source *source)
 	*/
 	result = pim_channel_del_oif(source->source_channel_oil,
 				     group->group_igmp_sock->interface,
-				     PIM_OIF_FLAG_PROTO_IGMP);
+					 PIM_OIF_FLAG_PROTO_IGMP,
+					 __func__);
 	if (result) {
 		if (PIM_DEBUG_IGMP_TRACE)
 			zlog_debug(
@@ -964,7 +824,7 @@ void igmp_source_forward_stop(struct igmp_source *source)
 void pim_forward_start(struct pim_ifchannel *ch)
 {
 	struct pim_upstream *up = ch->upstream;
-	uint32_t mask = PIM_OIF_FLAG_PROTO_PIM;
+	uint32_t mask = 0;
 
 	if (PIM_DEBUG_PIM_TRACE) {
 		char source_str[INET_ADDRSTRLEN];
@@ -977,15 +837,19 @@ void pim_forward_start(struct pim_ifchannel *ch)
 			       sizeof(group_str));
 		pim_inet4_dump("<upstream?>", up->upstream_addr, upstream_str,
 			       sizeof(upstream_str));
-		zlog_debug("%s: (S,G)=(%s,%s) oif=%s (%s)", __PRETTY_FUNCTION__,
+		zlog_debug("%s: (S,G)=(%s,%s) oif=%s (%pI4)", __func__,
 			   source_str, group_str, ch->interface->name,
-			   inet_ntoa(up->upstream_addr));
+			   &up->upstream_addr);
 	}
 
-	if (up->flags & PIM_UPSTREAM_FLAG_MASK_SRC_IGMP)
+	if (PIM_IF_FLAG_TEST_PROTO_IGMP(ch->flags))
 		mask = PIM_OIF_FLAG_PROTO_IGMP;
 
-	pim_channel_add_oif(up->channel_oil, ch->interface, mask);
+	if (PIM_IF_FLAG_TEST_PROTO_PIM(ch->flags))
+		mask |= PIM_OIF_FLAG_PROTO_PIM;
+
+	pim_channel_add_oif(up->channel_oil, ch->interface,
+			mask, __func__);
 }
 
 void pim_forward_stop(struct pim_ifchannel *ch, bool install_it)
@@ -994,7 +858,7 @@ void pim_forward_stop(struct pim_ifchannel *ch, bool install_it)
 
 	if (PIM_DEBUG_PIM_TRACE) {
 		zlog_debug("%s: (S,G)=%s oif=%s install_it: %d installed: %d",
-			   __PRETTY_FUNCTION__, ch->sg_str, ch->interface->name,
+			   __func__, ch->sg_str, ch->interface->name,
 			   install_it, up->channel_oil->installed);
 	}
 
@@ -1004,13 +868,13 @@ void pim_forward_stop(struct pim_ifchannel *ch, bool install_it)
 	 */
 	if (pim_upstream_evaluate_join_desired_interface(up, ch, ch->parent))
 		pim_channel_add_oif(up->channel_oil, ch->interface,
-				    PIM_OIF_FLAG_PROTO_PIM);
+				    PIM_OIF_FLAG_PROTO_PIM, __func__);
 	else
 		pim_channel_del_oif(up->channel_oil, ch->interface,
-				    PIM_OIF_FLAG_PROTO_PIM);
+				    PIM_OIF_FLAG_PROTO_PIM, __func__);
 
 	if (install_it && !up->channel_oil->installed)
-		pim_mroute_add(up->channel_oil, __PRETTY_FUNCTION__);
+		pim_upstream_mroute_add(up->channel_oil, __func__);
 }
 
 void pim_zebra_zclient_update(struct vty *vty)

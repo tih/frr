@@ -28,11 +28,7 @@ extern "C" {
  *
  * Design point is that if systemd is not being used on this system
  * then these functions becomes a no-op.
- *
- * To turn on systemd compilation, use --enable-systemd on
- * configure run.
  */
-void systemd_send_information(const char *info);
 void systemd_send_stopping(void);
 
 /*
@@ -40,12 +36,17 @@ void systemd_send_stopping(void);
  *  the_process - Should we send watchdog if we are not the requested
  *                process?
  */
-void systemd_send_started(struct thread_master *master, int the_process);
+void systemd_send_started(struct thread_master *master);
 
 /*
  * status - A status string to send to systemd
  */
 void systemd_send_status(const char *status);
+
+/*
+ * grab startup state from env vars
+ */
+void systemd_init_env(void);
 
 #ifdef __cplusplus
 }

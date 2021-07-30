@@ -33,13 +33,14 @@
 #include "lib/sigevent.h"
 #include "lib/thread.h"
 #include "lib/vrf.h"
+#include "lib/vty.h"
 
 #include "vrrp.h"
 #include "vrrp_debug.h"
 #include "vrrp_vty.h"
 #include "vrrp_zebra.h"
 
-DEFINE_MGROUP(VRRPD, "vrrpd")
+DEFINE_MGROUP(VRRPD, "vrrpd");
 
 char backup_config_file[256];
 
@@ -64,10 +65,14 @@ struct option longopts[] = { {0} };
 /* Master of threads. */
 struct thread_master *master;
 
+static struct frr_daemon_info vrrpd_di;
+
 /* SIGHUP handler. */
 static void sighup(void)
 {
 	zlog_info("SIGHUP received");
+
+	vty_read_config(NULL, vrrpd_di.config_file, config_default);
 }
 
 /* SIGINT / SIGTERM handler. */
@@ -76,6 +81,8 @@ static void __attribute__((noreturn)) sigint(void)
 	zlog_notice("Terminating on signal");
 
 	vrrp_fini();
+
+	frr_fini();
 
 	exit(0);
 }
@@ -105,8 +112,11 @@ struct quagga_signal_t vrrp_signals[] = {
 	},
 };
 
-static const struct frr_yang_module_info *vrrp_yang_modules[] = {
+static const struct frr_yang_module_info *const vrrp_yang_modules[] = {
+	&frr_filter_info,
+	&frr_vrf_info,
 	&frr_interface_info,
+	&frr_vrrpd_info,
 };
 
 #define VRRP_VTY_PORT 2619
@@ -118,7 +128,7 @@ FRR_DAEMON_INFO(vrrpd, VRRP, .vty_port = VRRP_VTY_PORT,
 		.privs = &vrrp_privs,
 		.yang_modules = vrrp_yang_modules,
 		.n_yang_modules = array_size(vrrp_yang_modules),
-)
+);
 
 int main(int argc, char **argv, char **envp)
 {

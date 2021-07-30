@@ -69,13 +69,13 @@ static void		 merge_l2vpns(struct ldpd_conf *, struct ldpd_conf *);
 static void		 merge_l2vpn(struct ldpd_conf *, struct l2vpn *,
 			    struct l2vpn *);
 
-DEFINE_QOBJ_TYPE(iface)
-DEFINE_QOBJ_TYPE(tnbr)
-DEFINE_QOBJ_TYPE(nbr_params)
-DEFINE_QOBJ_TYPE(l2vpn_if)
-DEFINE_QOBJ_TYPE(l2vpn_pw)
-DEFINE_QOBJ_TYPE(l2vpn)
-DEFINE_QOBJ_TYPE(ldpd_conf)
+DEFINE_QOBJ_TYPE(iface);
+DEFINE_QOBJ_TYPE(tnbr);
+DEFINE_QOBJ_TYPE(nbr_params);
+DEFINE_QOBJ_TYPE(l2vpn_if);
+DEFINE_QOBJ_TYPE(l2vpn_pw);
+DEFINE_QOBJ_TYPE(l2vpn);
+DEFINE_QOBJ_TYPE(ldpd_conf);
 
 struct ldpd_global	 global;
 struct ldpd_init	 init;
@@ -86,13 +86,37 @@ static struct imsgev	*iev_lde, *iev_lde_sync;
 static pid_t		 ldpe_pid;
 static pid_t		 lde_pid;
 
+static struct frr_daemon_info ldpd_di;
+
+DEFINE_HOOK(ldp_register_mib, (struct thread_master * tm), (tm));
+
+static void ldp_load_module(const char *name)
+{
+	const char *dir;
+	dir = ldpd_di.module_path ? ldpd_di.module_path : frr_moduledir;
+	char moderr[256];
+	struct frrmod_runtime *module;
+
+	module = frrmod_load(name, dir, moderr, sizeof(moderr));
+	if (!module) {
+		fprintf(stderr, "%s: failed to load %s", __func__, name);
+		log_warnx("%s: failed to load %s", __func__, name);
+	}
+}
+
+void ldp_agentx_enabled(void)
+{
+	ldp_load_module("snmp");
+	hook_call(ldp_register_mib, master);
+}
+
+enum ldpd_process ldpd_process;
+
 #define LDP_DEFAULT_CONFIG	"ldpd.conf"
 #define LDP_VTY_PORT		2612
 
 /* Master of threads. */
 struct thread_master *master;
-
-static struct frr_daemon_info ldpd_di;
 
 /* ldpd privileges */
 static zebra_capabilities_t _caps_p [] =
@@ -120,7 +144,7 @@ char ctl_sock_path[MAXPATHLEN];
 
 /* LDPd options. */
 #define OPTION_CTLSOCK 1001
-static struct option longopts[] =
+static const struct option longopts[] =
 {
 	{ "ctl_socket",  required_argument, NULL, OPTION_CTLSOCK},
 	{ "instance",    required_argument, NULL, 'n'},
@@ -177,7 +201,9 @@ static struct quagga_signal_t ldp_signals[] =
 	}
 };
 
-static const struct frr_yang_module_info *ldpd_yang_modules[] = {
+static const struct frr_yang_module_info *const ldpd_yang_modules[] = {
+	&frr_filter_info,
+	&frr_vrf_info,
 };
 
 FRR_DAEMON_INFO(ldpd, LDP,
@@ -192,7 +218,7 @@ FRR_DAEMON_INFO(ldpd, LDP,
 
 	.yang_modules = ldpd_yang_modules,
 	.n_yang_modules = array_size(ldpd_yang_modules),
-)
+);
 
 static int ldp_config_fork_apply(struct thread *t)
 {
@@ -235,9 +261,6 @@ main(int argc, char *argv[])
 	frr_opt_add("LEn:", longopts,
 		"      --ctl_socket   Override ctl socket path\n"
 		"  -n, --instance     Instance id\n");
-
-	/* set default instance (to differentiate ldpd socket from lde one */
-	init.instance = 1;
 
 	while (1) {
 		int opt;
@@ -306,9 +329,15 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	if (lflag || eflag)
-		openzlog(ldpd_di.progname, "LDP", 0,
-		         LOG_CONS | LOG_NDELAY | LOG_PID, LOG_DAEMON);
+	if (lflag || eflag) {
+		struct zprivs_ids_t ids;
+
+		zprivs_preinit(&ldpd_privs);
+		zprivs_get_ids(&ids);
+
+		zlog_init(ldpd_di.progname, "LDP", 0,
+			  ids.uid_normal, ids.gid_normal);
+	}
 	if (lflag)
 		lde();
 	else if (eflag)
@@ -484,11 +513,12 @@ ldpd_shutdown(void)
 static pid_t
 start_child(enum ldpd_process p, char *argv0, int fd_async, int fd_sync)
 {
-	char	*argv[3];
+	char	*argv[7];
 	int	 argc = 0, nullfd;
 	pid_t	 pid;
 
-	switch (pid = fork()) {
+	pid = fork();
+	switch (pid) {
 	case -1:
 		fatal("cannot fork");
 	case 0:
@@ -527,6 +557,11 @@ start_child(enum ldpd_process p, char *argv0, int fd_async, int fd_sync)
 		argv[argc++] = (char *)"-E";
 		break;
 	}
+
+	argv[argc++] = (char *)"-u";
+	argv[argc++] = (char *)ldpd_privs.user;
+	argv[argc++] = (char *)"-g";
+	argv[argc++] = (char *)ldpd_privs.group;
 	argv[argc++] = NULL;
 
 	execvp(argv0, argv);
@@ -573,6 +608,13 @@ main_dispatch_ldpe(struct thread *thread)
 				fatalx("IMSG_ACL_CHECK imsg with wrong len");
 			ldp_acl_reply(iev, (struct acl_check *)imsg.data);
 			break;
+		case IMSG_LDP_SYNC_IF_STATE_UPDATE:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct ldp_igp_sync_if_state))
+				fatalx("IMSG_LDP_SYNC_IF_STATE_UPDATE imsg with wrong len");
+
+			ldp_sync_zebra_send_state_update((struct ldp_igp_sync_if_state *)imsg.data);
+			break;
 		default:
 			log_debug("%s: error handling imsg %d", __func__,
 			    imsg.hdr.type);
@@ -584,8 +626,8 @@ main_dispatch_ldpe(struct thread *thread)
 		imsg_event_add(iev);
 	else {
 		/* this pipe is dead, so remove the event handlers and exit */
-		THREAD_READ_OFF(iev->ev_read);
-		THREAD_WRITE_OFF(iev->ev_write);
+		thread_cancel(&iev->ev_read);
+		thread_cancel(&iev->ev_write);
 		ldpe_pid = 0;
 		if (lde_pid == 0)
 			ldpd_shutdown();
@@ -605,6 +647,7 @@ main_dispatch_lde(struct thread *thread)
 	struct imsg	 imsg;
 	ssize_t		 n;
 	int		 shut = 0;
+	struct zapi_rlfa_response *rlfa_labels;
 
 	iev->ev_read = NULL;
 
@@ -649,23 +692,19 @@ main_dispatch_lde(struct thread *thread)
 			switch (imsg.hdr.type) {
 			case IMSG_KPW_ADD:
 				if (kmpw_add(imsg.data))
-					log_warnx("%s: error adding "
-					    "pseudowire", __func__);
+					log_warnx("%s: error adding pseudowire", __func__);
 				break;
 			case IMSG_KPW_DELETE:
 				if (kmpw_del(imsg.data))
-					log_warnx("%s: error deleting "
-					    "pseudowire", __func__);
+					log_warnx("%s: error deleting pseudowire", __func__);
 				break;
 			case IMSG_KPW_SET:
 				if (kmpw_set(imsg.data))
-					log_warnx("%s: error setting "
-					    "pseudowire", __func__);
+					log_warnx("%s: error setting pseudowire", __func__);
 				break;
 			case IMSG_KPW_UNSET:
 				if (kmpw_unset(imsg.data))
-					log_warnx("%s: error unsetting "
-					    "pseudowire", __func__);
+					log_warnx("%s: error unsetting pseudowire", __func__);
 				break;
 			}
 			break;
@@ -674,6 +713,15 @@ main_dispatch_lde(struct thread *thread)
 			    sizeof(struct acl_check))
 				fatalx("IMSG_ACL_CHECK imsg with wrong len");
 			ldp_acl_reply(iev, (struct acl_check *)imsg.data);
+			break;
+		case IMSG_RLFA_LABELS:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct zapi_rlfa_response)) {
+				log_warnx("%s: wrong imsg len", __func__);
+				break;
+			}
+			rlfa_labels = imsg.data;
+			ldp_zebra_send_rlfa_labels(rlfa_labels);
 			break;
 		default:
 			log_debug("%s: error handling imsg %d", __func__,
@@ -686,8 +734,8 @@ main_dispatch_lde(struct thread *thread)
 		imsg_event_add(iev);
 	else {
 		/* this pipe is dead, so remove the event handlers and exit */
-		THREAD_READ_OFF(iev->ev_read);
-		THREAD_WRITE_OFF(iev->ev_write);
+		thread_cancel(&iev->ev_read);
+		thread_cancel(&iev->ev_write);
 		lde_pid = 0;
 		if (ldpe_pid == 0)
 			ldpd_shutdown();
@@ -712,8 +760,8 @@ ldp_write_handler(struct thread *thread)
 		fatal("msgbuf_write");
 	if (n == 0) {
 		/* this pipe is dead, so remove the event handlers */
-		THREAD_READ_OFF(iev->ev_read);
-		THREAD_WRITE_OFF(iev->ev_write);
+		thread_cancel(&iev->ev_read);
+		thread_cancel(&iev->ev_write);
 		return (0);
 	}
 
@@ -800,7 +848,7 @@ evbuf_init(struct evbuf *eb, int fd, int (*handler)(struct thread *),
 void
 evbuf_clear(struct evbuf *eb)
 {
-	THREAD_WRITE_OFF(eb->ev);
+	thread_cancel(&eb->ev);
 	msgbuf_clear(&eb->wbuf);
 	eb->wbuf.fd = -1;
 }
@@ -844,8 +892,7 @@ main_imsg_send_net_socket(int af, enum socket_type type)
 
 	fd = ldp_create_socket(af, type);
 	if (fd == -1) {
-		log_warnx("%s: failed to create %s socket for address-family "
-		    "%s", __func__, socket_name(type), af_name(af));
+		log_warnx("%s: failed to create %s socket for address-family %s", __func__, socket_name(type), af_name(af));
 		return;
 	}
 
@@ -858,7 +905,6 @@ ldp_acl_request(struct imsgev *iev, char *acl_name, int af,
     union ldpd_addr *addr, uint8_t prefixlen)
 {
 	struct imsg	 imsg;
-	ssize_t		 n;
 	struct acl_check acl_check;
 
 	if (acl_name[0] == '\0')
@@ -876,9 +922,9 @@ ldp_acl_request(struct imsgev *iev, char *acl_name, int af,
 	imsg_flush(&iev->ibuf);
 
 	/* receive (blocking) and parse result */
-	if ((n = imsg_read(&iev->ibuf)) == -1)
+	if (imsg_read(&iev->ibuf) == -1)
 		fatal("imsg_read error");
-	if ((n = imsg_get(&iev->ibuf, &imsg)) == -1)
+	if (imsg_get(&iev->ibuf, &imsg) == -1)
 		fatal("imsg_get");
 	if (imsg.hdr.type != IMSG_ACL_CHECK ||
 	    imsg.hdr.len != IMSG_HEADER_SIZE + sizeof(int))
@@ -1141,6 +1187,7 @@ ldp_config_reset_main(struct ldpd_conf *conf)
 	conf->lhello_interval = DEFAULT_HELLO_INTERVAL;
 	conf->thello_holdtime = TARGETED_DFLT_HOLDTIME;
 	conf->thello_interval = DEFAULT_HELLO_INTERVAL;
+	conf->wait_for_sync_interval = DFLT_WAIT_FOR_SYNC;
 	conf->trans_pref = DUAL_STACK_LDPOV6;
 	conf->flags = 0;
 }
@@ -1271,6 +1318,14 @@ merge_config(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 static void
 merge_global(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 {
+	/* Removing global LDP config requires resetting LDP IGP Sync FSM */
+	if ((conf->flags & F_LDPD_ENABLED) &&
+	    (!(xconf->flags & F_LDPD_ENABLED)))
+	{
+		if (ldpd_process == PROC_LDP_ENGINE)
+			ldp_sync_fsm_reset_all();
+	}
+
 	/* change of router-id requires resetting all neighborships */
 	if (conf->rtr_id.s_addr != xconf->rtr_id.s_addr) {
 		if (ldpd_process == PROC_LDP_ENGINE) {
@@ -1284,10 +1339,19 @@ merge_global(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 		conf->rtr_id = xconf->rtr_id;
 	}
 
+	/*
+	 * Configuration of ordered-control or independent-control
+	 * requires resetting all neighborships.
+	 */
+	if ((conf->flags & F_LDPD_ORDERED_CONTROL) !=
+	    (xconf->flags & F_LDPD_ORDERED_CONTROL))
+		ldpe_reset_nbrs(AF_UNSPEC);
+
 	conf->lhello_holdtime = xconf->lhello_holdtime;
 	conf->lhello_interval = xconf->lhello_interval;
 	conf->thello_holdtime = xconf->thello_holdtime;
 	conf->thello_interval = xconf->thello_interval;
+	conf->wait_for_sync_interval = xconf->wait_for_sync_interval;
 
 	if (conf->trans_pref != xconf->trans_pref) {
 		if (ldpd_process == PROC_LDP_ENGINE)
@@ -1301,6 +1365,19 @@ merge_global(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 			ldpe_reset_ds_nbrs();
 	}
 
+	/*
+	 * Configuration of allow-broken-lsp requires reprograming all
+	 * labeled routes
+	 */
+	if ((conf->flags & F_LDPD_ALLOW_BROKEN_LSP) !=
+	    (xconf->flags & F_LDPD_ALLOW_BROKEN_LSP)) {
+		if (ldpd_process == PROC_LDE_ENGINE)
+			lde_allow_broken_lsp_update(xconf->flags);
+	}
+
+	if (ldpd_process == PROC_LDP_ENGINE)
+		ldpe_set_config_change_time();
+
 	conf->flags = xconf->flags;
 }
 
@@ -1310,9 +1387,11 @@ merge_af(int af, struct ldpd_af_conf *af_conf, struct ldpd_af_conf *xa)
 	int		 stop_init_backoff = 0;
 	int 		 remove_dynamic_tnbrs = 0;
 	int		 change_egress_label = 0;
+	int		 change_host_label = 0;
 	int		 reset_nbrs_ipv4 = 0;
 	int		 reset_nbrs = 0;
 	int		 update_sockets = 0;
+	int		 change_ldp_disabled = 0;
 
 	/* update timers */
 	if (af_conf->keepalive != xa->keepalive) {
@@ -1340,6 +1419,17 @@ merge_af(int af, struct ldpd_af_conf *af_conf, struct ldpd_af_conf *xa)
 	if ((af_conf->flags & F_LDPD_AF_EXPNULL) !=
 	    (xa->flags & F_LDPD_AF_EXPNULL))
 		change_egress_label = 1;
+
+	/* changing config of host only fec filtering */
+	if ((af_conf->flags & F_LDPD_AF_ALLOCHOSTONLY)
+	    != (xa->flags & F_LDPD_AF_ALLOCHOSTONLY))
+		change_host_label = 1;
+
+	/* disabling LDP for address family */
+	if ((af_conf->flags & F_LDPD_AF_ENABLED) &&
+	    !(xa->flags & F_LDPD_AF_ENABLED))
+		change_ldp_disabled = 1;
+
 	af_conf->flags = xa->flags;
 
 	/* update the transport address */
@@ -1349,6 +1439,9 @@ merge_af(int af, struct ldpd_af_conf *af_conf, struct ldpd_af_conf *xa)
 	}
 
 	/* update ACLs */
+	if (strcmp(af_conf->acl_label_allocate_for, xa->acl_label_allocate_for))
+		change_host_label = 1;
+
 	if (strcmp(af_conf->acl_label_advertise_to,
 	    xa->acl_label_advertise_to) ||
 	    strcmp(af_conf->acl_label_advertise_for,
@@ -1382,6 +1475,11 @@ merge_af(int af, struct ldpd_af_conf *af_conf, struct ldpd_af_conf *xa)
 	case PROC_LDE_ENGINE:
 		if (change_egress_label)
 			lde_change_egress_label(af);
+		if (change_host_label)
+			lde_change_allocate_filter(af);
+		if (change_ldp_disabled)
+			lde_route_update_release_all(af);
+
 		break;
 	case PROC_LDP_ENGINE:
 		if (stop_init_backoff)
@@ -1407,13 +1505,22 @@ merge_ifaces(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 	struct iface		*iface, *itmp, *xi;
 
 	RB_FOREACH_SAFE(iface, iface_head, &conf->iface_tree, itmp) {
-		/* find deleted interfaces */
-		if ((xi = if_lookup_name(xconf, iface->name)) == NULL) {
+		/* find deleted interfaces, which occurs when LDP is removed
+		 * for all address families
+		 */
+		if (if_lookup_name(xconf, iface->name) == NULL) {
 			switch (ldpd_process) {
 			case PROC_LDP_ENGINE:
 				ldpe_if_exit(iface);
 				break;
 			case PROC_LDE_ENGINE:
+				if (iface->ipv4.enabled)
+					lde_route_update_release(iface,
+					    AF_INET);
+				if (iface->ipv6.enabled)
+					lde_route_update_release(iface,
+					    AF_INET6);
+				break;
 			case PROC_MAIN:
 				break;
 			}
@@ -1439,6 +1546,29 @@ merge_ifaces(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 				break;
 			}
 			continue;
+		}
+
+		/* update labels when adding or removing ldp on an
+		 * interface
+		 */
+		if (ldpd_process == PROC_LDE_ENGINE) {
+			/* if we are removing lpd config for an address
+			 * family on an interface then advertise routes
+			 * learned over this interface as if they were
+			 * connected routes
+			 */
+			if (iface->ipv4.enabled && !xi->ipv4.enabled)
+				lde_route_update_release(iface, AF_INET);
+			if (iface->ipv6.enabled && !xi->ipv6.enabled)
+				lde_route_update_release(iface, AF_INET6);
+
+			/* if we are adding lpd config for an address
+			 * family on an interface then add proper labels
+			 */
+			if (!iface->ipv4.enabled && xi->ipv4.enabled)
+				lde_route_update(iface, AF_INET);
+			if (!iface->ipv6.enabled && xi->ipv6.enabled)
+				lde_route_update(iface, AF_INET6);
 		}
 
 		/* update existing interfaces */
@@ -1469,7 +1599,7 @@ merge_tnbrs(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 			continue;
 
 		/* find deleted tnbrs */
-		if ((xt = tnbr_find(xconf, tnbr->af, &tnbr->addr)) == NULL) {
+		if (tnbr_find(xconf, tnbr->af, &tnbr->addr) == NULL) {
 			switch (ldpd_process) {
 			case PROC_LDP_ENGINE:
 				tnbr->flags &= ~F_TNBR_CONFIGURED;
@@ -1515,33 +1645,35 @@ merge_nbrps(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 
 	RB_FOREACH_SAFE(nbrp, nbrp_head, &conf->nbrp_tree, ntmp) {
 		/* find deleted nbrps */
-		if ((xn = nbr_params_find(xconf, nbrp->lsr_id)) == NULL) {
-			switch (ldpd_process) {
-			case PROC_LDP_ENGINE:
-				nbr = nbr_find_ldpid(nbrp->lsr_id.s_addr);
-				if (nbr) {
-					session_shutdown(nbr, S_SHUTDOWN, 0, 0);
+		if (nbr_params_find(xconf, nbrp->lsr_id) != NULL)
+			continue;
+
+		switch (ldpd_process) {
+		case PROC_LDP_ENGINE:
+			nbr = nbr_find_ldpid(nbrp->lsr_id.s_addr);
+			if (nbr) {
+				session_shutdown(nbr, S_SHUTDOWN, 0, 0);
 #ifdef __OpenBSD__
-					pfkey_remove(nbr);
+				pfkey_remove(nbr);
 #else
-					sock_set_md5sig(
-					    (ldp_af_global_get(&global,
-					    nbr->af))->ldp_session_socket,
-					    nbr->af, &nbr->raddr, NULL);
+				sock_set_md5sig(
+					(ldp_af_global_get(&global, nbr->af))
+						->ldp_session_socket,
+					nbr->af, &nbr->raddr, NULL);
 #endif
-					nbr->auth.method = AUTH_NONE;
-					if (nbr_session_active_role(nbr))
-						nbr_establish_connection(nbr);
-				}
-				break;
-			case PROC_LDE_ENGINE:
-			case PROC_MAIN:
-				break;
+				nbr->auth.method = AUTH_NONE;
+				if (nbr_session_active_role(nbr))
+					nbr_establish_connection(nbr);
 			}
-			RB_REMOVE(nbrp_head, &conf->nbrp_tree, nbrp);
-			free(nbrp);
+			break;
+		case PROC_LDE_ENGINE:
+		case PROC_MAIN:
+			break;
 		}
+		RB_REMOVE(nbrp_head, &conf->nbrp_tree, nbrp);
+		free(nbrp);
 	}
+
 	RB_FOREACH_SAFE(xn, nbrp_head, &xconf->nbrp_tree, ntmp) {
 		/* find new nbrps */
 		if ((nbrp = nbr_params_find(conf, xn->lsr_id)) == NULL) {
@@ -1624,7 +1756,7 @@ merge_l2vpns(struct ldpd_conf *conf, struct ldpd_conf *xconf)
 
 	RB_FOREACH_SAFE(l2vpn, l2vpn_head, &conf->l2vpn_tree, ltmp) {
 		/* find deleted l2vpns */
-		if ((xl = l2vpn_find(xconf, l2vpn->name)) == NULL) {
+		if (l2vpn_find(xconf, l2vpn->name) == NULL) {
 			switch (ldpd_process) {
 			case PROC_LDE_ENGINE:
 				l2vpn_exit(l2vpn);
@@ -1680,14 +1812,14 @@ merge_l2vpn(struct ldpd_conf *xconf, struct l2vpn *l2vpn, struct l2vpn *xl)
 	/* merge intefaces */
 	RB_FOREACH_SAFE(lif, l2vpn_if_head, &l2vpn->if_tree, ftmp) {
 		/* find deleted interfaces */
-		if ((xf = l2vpn_if_find(xl, lif->ifname)) == NULL) {
+		if (l2vpn_if_find(xl, lif->ifname) == NULL) {
 			RB_REMOVE(l2vpn_if_head, &l2vpn->if_tree, lif);
 			free(lif);
 		}
 	}
 	RB_FOREACH_SAFE(xf, l2vpn_if_head, &xl->if_tree, ftmp) {
 		/* find new interfaces */
-		if ((lif = l2vpn_if_find(l2vpn, xf->ifname)) == NULL) {
+		if (l2vpn_if_find(l2vpn, xf->ifname) == NULL) {
 			COPY(lif, xf);
 			RB_INSERT(l2vpn_if_head, &l2vpn->if_tree, lif);
 			lif->l2vpn = l2vpn;
@@ -1706,7 +1838,7 @@ merge_l2vpn(struct ldpd_conf *xconf, struct l2vpn *l2vpn, struct l2vpn *xl)
 	/* merge active pseudowires */
 	RB_FOREACH_SAFE(pw, l2vpn_pw_head, &l2vpn->pw_tree, ptmp) {
 		/* find deleted active pseudowires */
-		if ((xp = l2vpn_pw_find_active(xl, pw->ifname)) == NULL) {
+		if (l2vpn_pw_find_active(xl, pw->ifname) == NULL) {
 			switch (ldpd_process) {
 			case PROC_LDE_ENGINE:
 				l2vpn_pw_exit(pw);
@@ -1807,7 +1939,7 @@ merge_l2vpn(struct ldpd_conf *xconf, struct l2vpn *l2vpn, struct l2vpn *xl)
 	/* merge inactive pseudowires */
 	RB_FOREACH_SAFE(pw, l2vpn_pw_head, &l2vpn->pw_inactive_tree, ptmp) {
 		/* find deleted inactive pseudowires */
-		if ((xp = l2vpn_pw_find_inactive(xl, pw->ifname)) == NULL) {
+		if (l2vpn_pw_find_inactive(xl, pw->ifname) == NULL) {
 			RB_REMOVE(l2vpn_pw_head, &l2vpn->pw_inactive_tree, pw);
 			free(pw);
 		}

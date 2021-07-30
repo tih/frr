@@ -36,7 +36,6 @@
 #include "zebra/zebra_vrf.h"
 #include "zebra/zebra_rnh.h"
 #include "zebra/router-id.h"
-#include "zebra/zebra_memory.h"
 #include "zebra/interface.h"
 #include "zebra/zebra_mpls.h"
 #include "zebra/zebra_vxlan.h"
@@ -48,8 +47,8 @@ static void zebra_vrf_table_create(struct zebra_vrf *zvrf, afi_t afi,
 static void zebra_rnhtable_node_cleanup(struct route_table *table,
 					struct route_node *node);
 
-DEFINE_MTYPE_STATIC(ZEBRA, ZEBRA_VRF, "ZEBRA VRF")
-DEFINE_MTYPE_STATIC(ZEBRA, OTHER_TABLE, "Other Table")
+DEFINE_MTYPE_STATIC(ZEBRA, ZEBRA_VRF, "ZEBRA VRF");
+DEFINE_MTYPE_STATIC(ZEBRA, OTHER_TABLE, "Other Table");
 
 /* VRF information update. */
 static void zebra_vrf_add_update(struct zebra_vrf *zvrf)
@@ -60,8 +59,13 @@ static void zebra_vrf_add_update(struct zebra_vrf *zvrf)
 	if (IS_ZEBRA_DEBUG_EVENT)
 		zlog_debug("MESSAGE: ZEBRA_VRF_ADD %s", zvrf_name(zvrf));
 
-	for (ALL_LIST_ELEMENTS(zrouter.client_list, node, nnode, client))
+	for (ALL_LIST_ELEMENTS(zrouter.client_list, node, nnode, client)) {
+		/* Do not send unsolicited messages to synchronous clients. */
+		if (client->synchronous)
+			continue;
+
 		zsend_vrf_add(client, zvrf);
+	}
 }
 
 static void zebra_vrf_delete_update(struct zebra_vrf *zvrf)
@@ -72,8 +76,13 @@ static void zebra_vrf_delete_update(struct zebra_vrf *zvrf)
 	if (IS_ZEBRA_DEBUG_EVENT)
 		zlog_debug("MESSAGE: ZEBRA_VRF_DELETE %s", zvrf_name(zvrf));
 
-	for (ALL_LIST_ELEMENTS(zrouter.client_list, node, nnode, client))
+	for (ALL_LIST_ELEMENTS(zrouter.client_list, node, nnode, client)) {
+		/* Do not send unsolicited messages to synchronous clients. */
+		if (client->synchronous)
+			continue;
+
 		zsend_vrf_delete(client, zvrf);
+	}
 }
 
 void zebra_vrf_update_all(struct zserv *client)
@@ -94,9 +103,9 @@ static int zebra_vrf_new(struct vrf *vrf)
 	if (IS_ZEBRA_DEBUG_EVENT)
 		zlog_debug("VRF %s created, id %u", vrf->name, vrf->vrf_id);
 
-	zvrf = zebra_vrf_alloc();
-	vrf->info = zvrf;
-	zvrf->vrf = vrf;
+	zvrf = zebra_vrf_alloc(vrf);
+	if (!vrf_is_backend_netns())
+		zvrf->zns = zebra_ns_lookup(NS_DEFAULT);
 
 	otable_init(&zvrf->other_tables);
 
@@ -122,7 +131,7 @@ static int zebra_vrf_enable(struct vrf *vrf)
 	else
 		zvrf->zns = zebra_ns_lookup(NS_DEFAULT);
 #if defined(HAVE_RTADV)
-	rtadv_init(zvrf);
+	rtadv_vrf_init(zvrf);
 #endif
 
 	/* Inform clients that the VRF is now active. This is an
@@ -168,7 +177,7 @@ static int zebra_vrf_disable(struct vrf *vrf)
 	zebra_vxlan_vrf_disable(zvrf);
 
 #if defined(HAVE_RTADV)
-	rtadv_terminate(zvrf);
+	rtadv_vrf_terminate(zvrf);
 #endif
 
 	/* Inform clients that the VRF is now inactive. This is a
@@ -305,6 +314,9 @@ static int zebra_vrf_delete(struct vrf *vrf)
 	list_delete_all_node(zvrf->rid_all_sorted_list);
 	list_delete_all_node(zvrf->rid_lo_sorted_list);
 
+	list_delete_all_node(zvrf->rid6_all_sorted_list);
+	list_delete_all_node(zvrf->rid6_lo_sorted_list);
+
 	otable_fini(&zvrf->other_tables);
 	XFREE(MTYPE_ZEBRA_VRF, zvrf);
 	vrf->info = NULL;
@@ -321,20 +333,6 @@ static int zebra_vrf_update(struct vrf *vrf)
 		zlog_debug("VRF %s id %u, name updated", vrf->name,
 			   zvrf_id(zvrf));
 	zebra_vrf_add_update(zvrf);
-	return 0;
-}
-
-
-/* Return if this VRF has any FRR configuration or not.
- * IMPORTANT: This function needs to be updated when additional configuration
- * is added for a VRF.
- */
-int zebra_vrf_has_config(struct zebra_vrf *zvrf)
-{
-	/* EVPN L3-VNI? */
-	if (zvrf->l3vni)
-		return 1;
-
 	return 0;
 }
 
@@ -398,23 +396,6 @@ done:
 	return table;
 }
 
-void zebra_rtable_node_cleanup(struct route_table *table,
-			       struct route_node *node)
-{
-	struct route_entry *re, *next;
-
-	RNODE_FOREACH_RE_SAFE (node, re, next) {
-		rib_unlink(node, re);
-	}
-
-	if (node->info) {
-		rib_dest_t *dest = node->info;
-
-		rnh_list_fini(&dest->nht);
-		XFREE(MTYPE_RIB_DEST, node->info);
-	}
-}
-
 static void zebra_rnhtable_node_cleanup(struct route_table *table,
 					struct route_node *node)
 {
@@ -444,11 +425,14 @@ static void zebra_vrf_table_create(struct zebra_vrf *zvrf, afi_t afi,
 }
 
 /* Allocate new zebra VRF. */
-struct zebra_vrf *zebra_vrf_alloc(void)
+struct zebra_vrf *zebra_vrf_alloc(struct vrf *vrf)
 {
 	struct zebra_vrf *zvrf;
 
 	zvrf = XCALLOC(MTYPE_ZEBRA_VRF, sizeof(struct zebra_vrf));
+
+	zvrf->vrf = vrf;
+	vrf->info = zvrf;
 
 	zebra_vxlan_init_tables(zvrf);
 	zebra_mpls_init_tables(zvrf);
@@ -534,6 +518,7 @@ static int vrf_config_write(struct vty *vty)
 
 
 		zebra_routemap_config_write_protocol(vty, zvrf);
+		router_id_write(vty, zvrf);
 
 		if (zvrf_id(zvrf) != VRF_DEFAULT)
 			vty_endframe(vty, " exit-vrf\n!\n");

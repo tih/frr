@@ -32,6 +32,7 @@
 #include "stream.h"
 #include "if.h"
 #include "lib_errors.h"
+#include "vrf.h"
 
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
@@ -45,7 +46,7 @@
 #include "privs.h"
 
 /* tcpdump -i eth0 'isis' -dd */
-static struct sock_filter isisfilter[] = {
+static const struct sock_filter isisfilter[] = {
 	/* NB: we're in SOCK_DGRAM, so src/dst mac + length are stripped
 	 * off!
 	 * (OTOH it's a bit more lower-layer agnostic and might work
@@ -57,9 +58,9 @@ static struct sock_filter isisfilter[] = {
 	{0x6, 0, 0, 0x00040000},       {0x6, 0, 0, 0x00000000},
 };
 
-static struct sock_fprog bpf = {
+static const struct sock_fprog bpf = {
 	.len = array_size(isisfilter),
-	.filter = isisfilter,
+	.filter = (struct sock_filter *)isisfilter,
 };
 
 /*
@@ -67,10 +68,10 @@ static struct sock_fprog bpf = {
  * ISO 10589 - 8.4.8
  */
 
-uint8_t ALL_L1_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x14};
-uint8_t ALL_L2_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x15};
-uint8_t ALL_ISS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x05};
-uint8_t ALL_ESS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x04};
+static const uint8_t ALL_L1_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x14};
+static const uint8_t ALL_L2_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x15};
+static const uint8_t ALL_ISS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x05};
+static const uint8_t ALL_ESS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x04};
 
 static uint8_t discard_buff[8192];
 
@@ -101,8 +102,7 @@ static int isis_multicast_join(int fd, int registerto, int if_num)
 	}
 #ifdef EXTREME_DEBUG
 	zlog_debug(
-		"isis_multicast_join(): fd=%d, reg_to=%d, if_num=%d, "
-		"address = %02x:%02x:%02x:%02x:%02x:%02x",
+		"isis_multicast_join(): fd=%d, reg_to=%d, if_num=%d, address = %02x:%02x:%02x:%02x:%02x:%02x",
 		fd, registerto, if_num, mreq.mr_address[0], mreq.mr_address[1],
 		mreq.mr_address[2], mreq.mr_address[3], mreq.mr_address[4],
 		mreq.mr_address[5]);
@@ -121,8 +121,18 @@ static int open_packet_socket(struct isis_circuit *circuit)
 {
 	struct sockaddr_ll s_addr;
 	int fd, retval = ISIS_OK;
+	struct vrf *vrf = NULL;
 
-	fd = socket(PF_PACKET, SOCK_DGRAM, htons(ETH_P_ALL));
+	vrf = vrf_lookup_by_id(circuit->interface->vrf_id);
+
+	if (vrf == NULL) {
+		zlog_warn("open_packet_socket(): failed to find vrf node");
+		return ISIS_WARNING;
+	}
+
+	fd = vrf_socket(PF_PACKET, SOCK_DGRAM, htons(ETH_P_ALL),
+			circuit->interface->vrf_id, vrf->name);
+
 	if (fd < 0) {
 		zlog_warn("open_packet_socket(): socket() failed %s",
 			  safe_strerror(errno));
@@ -236,16 +246,13 @@ int isis_recv_pdu_bcast(struct isis_circuit *circuit, uint8_t *ssnpa)
 	    || (s_addr.sll_ifindex != (int)circuit->interface->ifindex)) {
 		if (bytesread < 0) {
 			zlog_warn(
-				"isis_recv_packet_bcast(): ifname %s, fd %d, "
-				"bytesread %d, recvfrom(): %s",
+				"isis_recv_packet_bcast(): ifname %s, fd %d, bytesread %d, recvfrom(): %s",
 				circuit->interface->name, circuit->fd,
 				bytesread, safe_strerror(errno));
 		}
 		if (s_addr.sll_ifindex != (int)circuit->interface->ifindex) {
 			zlog_warn(
-				"packet is received on multiple interfaces: "
-				"socket interface %d, circuit interface %d, "
-				"packet type %u",
+				"packet is received on multiple interfaces: socket interface %d, circuit interface %d, packet type %u",
 				s_addr.sll_ifindex, circuit->interface->ifindex,
 				s_addr.sll_pkttype);
 		}

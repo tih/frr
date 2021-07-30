@@ -88,18 +88,16 @@ static void rip_zebra_ipv4_send(struct rip *rip, struct route_node *rp,
 
 	if (IS_RIP_DEBUG_ZEBRA) {
 		if (rip->ecmp)
-			zlog_debug("%s: %s/%d nexthops %d",
+			zlog_debug("%s: %pFX nexthops %d",
 				   (cmd == ZEBRA_ROUTE_ADD)
 					   ? "Install into zebra"
 					   : "Delete from zebra",
-				   inet_ntoa(rp->p.u.prefix4), rp->p.prefixlen,
-				   count);
+				   &rp->p, count);
 		else
-			zlog_debug("%s: %s/%d",
+			zlog_debug("%s: %pFX",
 				   (cmd == ZEBRA_ROUTE_ADD)
 					   ? "Install into zebra"
-					   : "Delete from zebra",
-				   inet_ntoa(rp->p.u.prefix4), rp->p.prefixlen);
+					   : "Delete from zebra", &rp->p);
 	}
 
 	rip->counters.route_changes++;
@@ -151,8 +149,8 @@ static int rip_zebra_read_route(ZAPI_CALLBACK_ARGS)
 
 void rip_redistribute_conf_update(struct rip *rip, int type)
 {
-	zclient_redistribute(ZEBRA_REDISTRIBUTE_ADD, zclient, AFI_IP, type,
-			     0, rip->vrf->vrf_id);
+	zebra_redistribute_send(ZEBRA_REDISTRIBUTE_ADD, zclient, AFI_IP,
+				type, 0, rip->vrf->vrf_id);
 }
 
 void rip_redistribute_conf_delete(struct rip *rip, int type)

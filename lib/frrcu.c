@@ -54,12 +54,12 @@
 #include "seqlock.h"
 #include "atomlist.h"
 
-DEFINE_MTYPE_STATIC(LIB, RCU_THREAD,    "RCU thread")
-DEFINE_MTYPE_STATIC(LIB, RCU_NEXT,      "RCU sequence barrier")
+DEFINE_MTYPE_STATIC(LIB, RCU_THREAD,    "RCU thread");
+DEFINE_MTYPE_STATIC(LIB, RCU_NEXT,      "RCU sequence barrier");
 
-DECLARE_ATOMLIST(rcu_heads, struct rcu_head, head)
+DECLARE_ATOMLIST(rcu_heads, struct rcu_head, head);
 
-PREDECL_ATOMLIST(rcu_threads)
+PREDECL_ATOMLIST(rcu_threads);
 struct rcu_thread {
 	struct rcu_threads_item head;
 
@@ -70,7 +70,7 @@ struct rcu_thread {
 	/* only accessed by thread itself, not atomic */
 	unsigned depth;
 };
-DECLARE_ATOMLIST(rcu_threads, struct rcu_thread, head)
+DECLARE_ATOMLIST(rcu_threads, struct rcu_thread, head);
 
 static const struct rcu_action rcua_next  = { .type = RCUA_NEXT };
 static const struct rcu_action rcua_end   = { .type = RCUA_END };
@@ -206,7 +206,7 @@ void rcu_thread_unprepare(struct rcu_thread *rt)
 	rcu_bump();
 	if (rt != &rcu_thread_main)
 		/* this free() happens after seqlock_release() below */
-		rcu_free_internal(&_mt_RCU_THREAD, rt, rcu_head);
+		rcu_free_internal(MTYPE_RCU_THREAD, rt, rcu_head);
 
 	rcu_threads_del(&rcu_threads, rt);
 	seqlock_release(&rt->rcu);
@@ -269,7 +269,7 @@ static void rcu_bump(void)
 	 * "last item is being deleted - start over" case, and then we may end
 	 * up accessing old RCU queue items that are already free'd.
 	 */
-	rcu_free_internal(&_mt_RCU_NEXT, rn, head_free);
+	rcu_free_internal(MTYPE_RCU_NEXT, rn, head_free);
 
 	/* Only allow the RCU sweeper to run after these 2 items are queued.
 	 *

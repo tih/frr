@@ -55,8 +55,14 @@ This is the recommended test writing routine:
 * Create topology from json
 * Create configuration from json
 * Write the tests
+* Format the new code using `black <https://github.com/psf/black>`_
 * Create a Pull Request
 
+.. Note::
+
+   BGP tests MUST use generous convergence timeouts - you must ensure
+   that any test involving BGP uses a convergence timeout of at least
+   130 seconds.
 
 File Hierarchy
 ^^^^^^^^^^^^^^
@@ -89,7 +95,7 @@ The first step to write a new test is to define the topology and initial
 configuration. User has to define topology and initial configuration in JSON
 file. Here is an example of JSON file::
 
-   BGP neihghborship with single phy-link, sample JSON file:
+   BGP neighborship with single phy-link, sample JSON file:
    {
    "ipv4base": "192.168.0.0",
    "ipv4mask": 30,

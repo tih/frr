@@ -19,6 +19,9 @@
 #include "lib_errors.h"
 #include "resolver.h"
 #include "command.h"
+#include "xref.h"
+
+XREF_SETUP();
 
 struct resolver_state {
 	ares_channel channel;
@@ -145,7 +148,8 @@ static void ares_address_cb(void *arg, int status, int timeouts,
 {
 	struct resolver_query *query = (struct resolver_query *)arg;
 	union sockunion addr[16];
-	void (*callback)(struct resolver_query *, int, union sockunion *);
+	void (*callback)(struct resolver_query *, const char *, int,
+			 union sockunion *);
 	size_t i;
 
 	callback = query->callback;
@@ -153,9 +157,10 @@ static void ares_address_cb(void *arg, int status, int timeouts,
 
 	if (status != ARES_SUCCESS) {
 		if (resolver_debug)
-			zlog_debug("[%p] Resolving failed", query);
+			zlog_debug("[%p] Resolving failed (%s)",
+				   query, ares_strerror(status));
 
-		callback(query, -1, NULL);
+		callback(query, ares_strerror(status), -1, NULL);
 		return;
 	}
 
@@ -177,14 +182,29 @@ static void ares_address_cb(void *arg, int status, int timeouts,
 	if (resolver_debug)
 		zlog_debug("[%p] Resolved with %d results", query, (int)i);
 
-	callback(query, i, &addr[0]);
+	callback(query, NULL, i, &addr[0]);
+}
+
+static int resolver_cb_literal(struct thread *t)
+{
+	struct resolver_query *query = THREAD_ARG(t);
+	void (*callback)(struct resolver_query *, const char *, int,
+			 union sockunion *);
+
+	callback = query->callback;
+	query->callback = NULL;
+
+	callback(query, ARES_SUCCESS, 1, &query->literal_addr);
+	return 0;
 }
 
 void resolver_resolve(struct resolver_query *query, int af,
 		      const char *hostname,
-		      void (*callback)(struct resolver_query *, int,
-				       union sockunion *))
+		      void (*callback)(struct resolver_query *, const char *,
+				       int, union sockunion *))
 {
+	int ret;
+
 	if (query->callback != NULL) {
 		flog_err(
 			EC_LIB_RESOLVER,
@@ -193,10 +213,26 @@ void resolver_resolve(struct resolver_query *query, int af,
 		return;
 	}
 
+	query->callback = callback;
+	query->literal_cb = NULL;
+
+	ret = str2sockunion(hostname, &query->literal_addr);
+	if (ret == 0) {
+		if (resolver_debug)
+			zlog_debug("[%p] Resolving '%s' (IP literal)",
+				   query, hostname);
+
+		/* for consistency with proper name lookup, don't call the
+		 * callback immediately; defer to thread loop
+		 */
+		thread_add_timer_msec(state.master, resolver_cb_literal,
+				      query, 0, &query->literal_cb);
+		return;
+	}
+
 	if (resolver_debug)
 		zlog_debug("[%p] Resolving '%s'", query, hostname);
 
-	query->callback = callback;
 	ares_gethostbyname(state.channel, hostname, af, ares_address_cb, query);
 	resolver_update_timeouts(&state);
 }
@@ -212,7 +248,13 @@ DEFUN(debug_resolver,
 	return CMD_SUCCESS;
 }
 
-static struct cmd_node resolver_debug_node = {RESOLVER_DEBUG_NODE, "", 1};
+static int resolver_config_write_debug(struct vty *vty);
+static struct cmd_node resolver_debug_node = {
+	.name = "resolver debug",
+	.node = RESOLVER_DEBUG_NODE,
+	.prompt = "",
+	.config_write = resolver_config_write_debug,
+};
 
 static int resolver_config_write_debug(struct vty *vty)
 {
@@ -241,7 +283,7 @@ void resolver_init(struct thread_master *tm)
 			  ARES_OPT_SOCK_STATE_CB | ARES_OPT_TIMEOUT
 				  | ARES_OPT_TRIES);
 
-	install_node(&resolver_debug_node, resolver_config_write_debug);
+	install_node(&resolver_debug_node);
 	install_element(CONFIG_NODE, &debug_resolver_cmd);
 	install_element(ENABLE_NODE, &debug_resolver_cmd);
 }

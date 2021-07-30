@@ -31,12 +31,13 @@
 #include "memory.h"
 #include "vector.h"
 #include "graph.h"
+#include "xref.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-DECLARE_MTYPE(CMD_ARG)
+DECLARE_MTYPE(CMD_ARG);
 
 struct vty;
 
@@ -74,6 +75,7 @@ enum cmd_token_type {
 enum { CMD_ATTR_NORMAL,
        CMD_ATTR_DEPRECATED,
        CMD_ATTR_HIDDEN,
+       CMD_ATTR_YANG,
 };
 
 /* Comamand token struct. */
@@ -97,13 +99,14 @@ struct cmd_element {
 	const char *string; /* Command specification by string. */
 	const char *doc;    /* Documentation of this command. */
 	int daemon;	 /* Daemon to which this command belong. */
-	uint8_t attr;       /* Command attributes */
+	uint32_t attr;       /* Command attributes */
 
 	/* handler function for command */
 	int (*func)(const struct cmd_element *, struct vty *, int,
 		    struct cmd_token *[]);
 
 	const char *name; /* symbol name for debugging */
+	struct xref xref;
 };
 
 /* text for <cr> command */
@@ -116,7 +119,7 @@ extern struct cmd_token *cmd_token_dup(struct cmd_token *);
 extern void cmd_token_del(struct cmd_token *);
 extern void cmd_token_varname_set(struct cmd_token *token, const char *varname);
 
-extern void cmd_graph_parse(struct graph *graph, struct cmd_element *cmd);
+extern void cmd_graph_parse(struct graph *graph, const struct cmd_element *cmd);
 extern void cmd_graph_names(struct graph *graph);
 extern void cmd_graph_merge(struct graph *old, struct graph *n,
 			    int direction);

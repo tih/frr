@@ -47,8 +47,12 @@ struct ospf6_neighbor {
 	uint32_t state_change;
 	struct timeval last_changed;
 
+	/* last received hello */
+	struct timeval last_hello;
+	uint32_t hello_in;
+
 	/* Neighbor Router ID */
-	uint32_t router_id;
+	in_addr_t router_id;
 
 	/* Neighbor Interface ID */
 	ifindex_t ifindex;
@@ -56,15 +60,15 @@ struct ospf6_neighbor {
 	/* Router Priority of this neighbor */
 	uint8_t priority;
 
-	uint32_t drouter;
-	uint32_t bdrouter;
-	uint32_t prev_drouter;
-	uint32_t prev_bdrouter;
+	in_addr_t drouter;
+	in_addr_t bdrouter;
+	in_addr_t prev_drouter;
+	in_addr_t prev_bdrouter;
 
 	/* Options field (Capability) */
 	char options[3];
 
-	/* IPaddr of I/F on our side link */
+	/* IPaddr of I/F on neighbour's link */
 	struct in6_addr linklocal_addr;
 
 	/* For Database Exchange */
@@ -89,6 +93,9 @@ struct ospf6_neighbor {
 	/* Inactivity timer */
 	struct thread *inactivity_timer;
 
+	/* Timer to release the last dbdesc packet */
+	struct thread *last_dbdesc_release_timer;
+
 	/* Thread for sending message */
 	struct thread *thread_send_dbdesc;
 	struct thread *thread_send_lsreq;
@@ -96,7 +103,7 @@ struct ospf6_neighbor {
 	struct thread *thread_send_lsack;
 
 	/* BFD information */
-	void *bfd_info;
+	struct bfd_session_params *bfd_session;
 };
 
 /* Neighbor state */
@@ -123,11 +130,7 @@ struct ospf6_neighbor {
 #define OSPF6_NEIGHBOR_EVENT_INACTIVITY_TIMER    10
 #define OSPF6_NEIGHBOR_EVENT_MAX_EVENT           11
 
-static const char *ospf6_neighbor_event_str[] = {
-	"NoEvent",      "HelloReceived", "2-WayReceived",   "NegotiationDone",
-	"ExchangeDone", "LoadingDone",   "AdjOK?",	  "SeqNumberMismatch",
-	"BadLSReq",     "1-WayReceived", "InactivityTimer",
-};
+extern const char *const ospf6_neighbor_event_str[];
 
 static inline const char *ospf6_neighbor_event_string(int event)
 {
@@ -138,7 +141,7 @@ static inline const char *ospf6_neighbor_event_string(int event)
 	return OSPF6_NEIGHBOR_UNKNOWN_EVENT_STRING;
 }
 
-extern const char *ospf6_neighbor_state_str[];
+extern const char *const ospf6_neighbor_state_str[];
 
 
 /* Function Prototypes */
@@ -170,6 +173,6 @@ extern void install_element_ospf6_debug_neighbor(void);
 
 DECLARE_HOOK(ospf6_neighbor_change,
 	     (struct ospf6_neighbor * on, int state, int next_state),
-	     (on, state, next_state))
+	     (on, state, next_state));
 
 #endif /* OSPF6_NEIGHBOR_H */
